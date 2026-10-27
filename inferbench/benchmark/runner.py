@@ -8,7 +8,7 @@ import numpy as np
 import onnxruntime as ort
 
 from inferbench.benchmark.correctness import compare_outputs
-from inferbench.benchmark.metrics import latency_stats, memory_mb, throughput_per_sec
+from inferbench.benchmark.metrics import PeakMemoryMonitor, latency_stats, memory_mb, throughput_per_sec
 
 # Map ONNX type strings to numpy types
 _ONNX_TO_NUMPY = {
@@ -112,11 +112,11 @@ def run_benchmark(model_path, config=None, inputs=None):
     seed = int(_cfg(config, "seed", 0))
 
     memory_before = memory_mb()
-    session = create_session(model_path, config)
-    if inputs is None:
-        inputs = make_dummy_inputs(session, batch_size=batch, seed=seed)
-
-    latencies, total_s, outputs = time_session(session, inputs, warmup, runs)
+    with PeakMemoryMonitor() as mon:  # also covers model loading, which can be the biggest spike
+        session = create_session(model_path, config)
+        if inputs is None:
+            inputs = make_dummy_inputs(session, batch_size=batch, seed=seed)
+        latencies, total_s, outputs = time_session(session, inputs, warmup, runs)
     memory_after = memory_mb()
 
     result = {
@@ -126,8 +126,10 @@ def run_benchmark(model_path, config=None, inputs=None):
         "batch_size": batch,
         **latency_stats(latencies),
         "throughput_per_sec": throughput_per_sec(runs, total_s, batch),
-        "memory_mb": memory_after,
+        "memory_mb": memory_after,                 # memory when the run ended
         "memory_delta_mb": memory_after - memory_before,
+        "peak_memory_mb": mon.peak_mb,             # highest memory seen during the run
+        "peak_memory_delta_mb": mon.delta_mb,      # peak minus where we started
         "environment": get_environment(session),
     }
     return result, outputs, inputs
@@ -164,10 +166,80 @@ def get_environment(session=None):
     }
 
 
-def to_benchmark_result(data):
-    """Convert our dict into the shared BenchmarkResult (keeps only fields it has)."""
+def to_benchmark_result(data, config=None, correctness=None):
+    """Turn the runner's dict into the shared BenchmarkResult.
+
+    data         - the dict returned by run_benchmark()
+    config       - the BenchmarkConfig that was used (a default one is made if missing)
+    correctness  - optional dict from compare_outputs(); fills correct / max_abs_diff
+    """
+    from inferbench.common.benchmarktypes import BenchmarkConfig, BenchmarkResult
+
+    if config is None:
+        config = BenchmarkConfig(model_path=data.get("model_path", ""))
+
+    return BenchmarkResult(
+        config=config,
+        success=True,
+        latency_mean_ms=data["mean_ms"],
+        latency_p50_ms=data["p50_ms"],
+        latency_p90_ms=data["p90_ms"],
+        latency_p95_ms=data["p95_ms"],
+        latency_p99_ms=data["p99_ms"],
+        latency_min_ms=data["min_ms"],
+        latency_max_ms=data["max_ms"],
+        throughput_per_sec=data["throughput_per_sec"],
+        peak_memory_mb=data["peak_memory_mb"],
+        correct=None if correctness is None else correctness["passed"],
+        max_abs_diff=None if correctness is None else correctness["max_abs_diff"],
+        environment=data.get("environment", {}),
+    )
+
+
+def failed_result(config, error):
+    """A BenchmarkResult for a run that crashed (so the optimizer can skip it)."""
     from inferbench.common.benchmarktypes import BenchmarkResult
 
-    names = {f.name for f in dataclasses.fields(BenchmarkResult)}
-    kept = {k: v for k, v in data.items() if k in names}
-    return BenchmarkResult(**kept)
+    return BenchmarkResult(config=config, success=False, error_message=str(error))
+
+
+@dataclasses.dataclass
+class Baseline:
+    """The reference run every candidate config is compared against."""
+    config: object
+    result: object      # BenchmarkResult for the baseline itself
+    outputs: list       # baseline output arrays
+    inputs: dict        # the exact inputs used (candidates must reuse these)
+
+
+def make_baseline(config):
+    """Run the plain reference setup once: no graph optimisation, 1 thread.
+
+    Do this ONCE per model, then pass the result to evaluate_config() for
+    every candidate, so the baseline is not re-run each time.
+    """
+    base_cfg = dataclasses.replace(config, graph_optimization_level="disable", num_threads=1)
+    data, outputs, inputs = run_benchmark(config.model_path, base_cfg)
+    result = to_benchmark_result(data, base_cfg, compare_outputs(outputs, outputs))
+    return Baseline(config=base_cfg, result=result, outputs=outputs, inputs=inputs)
+
+
+def evaluate_config(config, baseline=None):
+    """Benchmark one config AND check it against the baseline.
+
+    Always returns a BenchmarkResult and never raises:
+      - crashed            -> success=False, error_message filled in
+      - wrong outputs      -> success=True, correct=False  (is_valid is False)
+      - fast and correct   -> success=True, correct=True   (is_valid is True)
+    """
+    try:
+        if baseline is None:
+            baseline = make_baseline(config)
+        data, outputs, _ = run_benchmark(config.model_path, config, inputs=baseline.inputs)
+        check = compare_outputs(
+            baseline.outputs, outputs,
+            rtol=_cfg(config, "rel_tol", 1e-3), atol=_cfg(config, "abs_tol", 1e-5),
+        )
+        return to_benchmark_result(data, config, check)
+    except Exception as exc:  # a bad config must not stop the whole search
+        return failed_result(config, f"{type(exc).__name__}: {exc}")
