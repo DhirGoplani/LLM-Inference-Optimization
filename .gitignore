@@ -1,0 +1,15 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+models/*.onnx
+models/*.onnx.data
+results/*
+!models/.gitkeep
+!results/.gitkeep
+
+.DS_Store
+Thumbs.db
+.vscode/
