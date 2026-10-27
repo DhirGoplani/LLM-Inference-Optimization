@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+import onnx
+from onnx import TensorProto, helper, numpy_helper
 import pytest
 
 from inferbench.api.main import app
@@ -242,3 +245,54 @@ def test_benchmark_unexpected_exception_handled_gracefully(tmp_path):
         assert "Benchmark execution failed" in data["error_message"]
         # Ensure no traceback leaked
         assert "Traceback" not in json.dumps(data)
+
+
+# ---------- Real benchmark integration test ----------
+
+def test_benchmark_real_model_integration(tmp_path):
+    """End-to-end integration test with a real tiny ONNX model (Y = X + 2).
+
+    Validates that POST /benchmark executes the full benchmark engine,
+    performs correctness checks against an unoptimized baseline, and returns
+    a valid, JSON-serializable benchmark result without mocking evaluate_config.
+    """
+    model_path = tmp_path / "add_two.onnx"
+
+    two_const = numpy_helper.from_array(np.array([2.0], dtype=np.float32), name="two")
+    add_node = helper.make_node("Add", inputs=["X", "two"], outputs=["Y"], name="add_node")
+    graph = helper.make_graph(
+        nodes=[add_node],
+        name="AddTwoGraph",
+        inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 4])],
+        outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 4])],
+        initializer=[two_const],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    # Validate ONNX model before saving
+    onnx.checker.check_model(model)
+    onnx.save(model, str(model_path))
+
+    status_code, data = call_api(
+        "POST",
+        "/benchmark",
+        {
+            "model_path": str(model_path),
+            "warmup_runs": 1,
+            "timed_runs": 5,
+            "batch_size": 1,
+            "execution_provider": "CPUExecutionProvider",
+        },
+    )
+
+    assert status_code == 200
+    assert data["success"] is True
+    assert data["correct"] is True
+    assert data["is_valid"] is True
+    assert data["latency_mean_ms"] is not None and data["latency_mean_ms"] > 0
+    assert data["throughput_per_sec"] is not None and data["throughput_per_sec"] > 0
+    assert data["peak_memory_mb"] is not None and data["peak_memory_mb"] > 0
+    assert "environment" in data
+    assert "providers" in data["environment"]
+    assert "CPUExecutionProvider" in data["environment"]["providers"]
