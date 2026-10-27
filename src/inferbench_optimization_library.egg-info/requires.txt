@@ -1,0 +1,7 @@
+
+[onnx]
+onnx>=1.16
+onnxruntime>=1.18
+
+[test]
+pytest>=8
