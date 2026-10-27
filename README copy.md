@@ -57,6 +57,19 @@ for candidate in candidates:
 print("Skipped strategies:", skipped)
 ```
 
+To benchmark the generated candidates, pass them through the integration
+adapter. It creates a `BenchmarkConfig` for each candidate, reuses one
+correctness baseline, and selects only valid results:
+
+```python
+from inferbench.common.benchmarktypes import BenchmarkConfig
+from inferbench_optimizers import benchmark_candidates, select_best
+
+base_config = BenchmarkConfig(model_path="models/model.onnx")
+results = benchmark_candidates(base_config, candidates)
+best = select_best(results, metric="latency_p50_ms")
+```
+
 ## Safety and correctness boundaries
 
 - Candidate generation is not proof that a configuration improves performance.
