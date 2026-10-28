@@ -5,14 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "inferbench-optimization-library"
 version = "0.1.0"
-description = "Plugin-based optimization strategy library for InferBench AutoTune"
+description = "InferBench AutoTune: ONNX benchmark engine and optimization strategy library"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "psutil",
+]
 
 [project.optional-dependencies]
-onnx = ["onnx>=1.16", "onnxruntime>=1.18"]
 test = ["pytest>=8"]
+# only needed to export the MobileNet test model (scripts/makemodel.py)
+modelgen = ["torch", "torchvision", "onnxscript"]
+
+[tool.setuptools.packages.find]
+where = ["src", "."]
+include = ["inferbench*", "inferbench_optimizers*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
-testpaths = ["tests"]
+pythonpath = [".", "src"]
+testpaths = ["test", "tests"]
