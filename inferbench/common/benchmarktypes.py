@@ -1,18 +1,22 @@
 from dataclasses import dataclass, field, asdict
 from typing import Optional
 
+
+
 @dataclass
 class BenchmarkConfig:
-    model_path:str
+    model_path: str
     execution_provider: str = "CPUExecutionProvider"
-    graph_optimization_level: str="all"
-    num_threads: int=0
-    batch_size: int=1
-    warmup_runs: int=10
-    timed_runs: int=100
-    rel_tol: float=1e-3
-    abs_tol: float=1e-5
-    seed: int=0
+    graph_optimization_level: str = "all"
+    num_threads: int = 0
+    inter_op_num_threads: int = 0
+    batch_size: int = 1
+    warmup_runs: int = 10
+    timed_runs: int = 100
+    rel_tol: float = 1e-3
+    abs_tol: float = 1e-5
+    seed: int = 0
+
 
 @dataclass
 class BenchmarkResult:
