@@ -296,3 +296,249 @@ def test_benchmark_real_model_integration(tmp_path):
     assert "environment" in data
     assert "providers" in data["environment"]
     assert "CPUExecutionProvider" in data["environment"]["providers"]
+
+
+# ---------- /tune endpoint tests ----------
+
+def test_tune_missing_required_fields():
+    status_code, data = call_api("POST", "/tune", {})
+    assert status_code == 422
+    assert "detail" in data
+
+
+def test_tune_empty_model_path():
+    status_code, data = call_api("POST", "/tune", {"model_path": ""})
+    assert status_code == 422
+
+
+def test_tune_whitespace_model_path():
+    status_code, data = call_api("POST", "/tune", {"model_path": "   "})
+    assert status_code == 400
+    assert "empty" in data["detail"].lower()
+
+
+def test_tune_missing_model_file_on_disk():
+    status_code, data = call_api("POST", "/tune", {"model_path": "nonexistent_model.onnx"})
+    assert status_code == 400
+    assert "does not exist" in data["detail"].lower()
+
+
+def test_tune_model_path_is_directory(tmp_path):
+    status_code, data = call_api("POST", "/tune", {"model_path": str(tmp_path)})
+    assert status_code == 400
+    assert "not a file" in data["detail"].lower()
+
+
+def test_tune_invalid_metric(tmp_path):
+    dummy_model = tmp_path / "model.onnx"
+    dummy_model.write_bytes(b"dummy")
+    status_code, data = call_api(
+        "POST",
+        "/tune",
+        {"model_path": str(dummy_model), "metric": "invalid_metric"},
+    )
+    assert status_code == 422
+
+
+def test_tune_endpoint_response_documentation():
+    """Verify that HTTP 400 for missing/invalid model path is documented in OpenAPI schema."""
+    openapi_schema = app.openapi()
+    responses = openapi_schema["paths"]["/tune"]["post"]["responses"]
+    assert "400" in responses
+    assert "model path" in responses["400"]["description"].lower()
+
+
+def test_tune_real_model_integration(tmp_path):
+    """End-to-end integration test with real tiny ONNX model for AutoTune."""
+    model_path = tmp_path / "tune_add_two.onnx"
+    two_const = numpy_helper.from_array(np.array([2.0], dtype=np.float32), name="two")
+    add_node = helper.make_node("Add", inputs=["X", "two"], outputs=["Y"], name="add_node")
+    graph = helper.make_graph(
+        nodes=[add_node],
+        name="AddTwoGraph",
+        inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 4])],
+        outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 4])],
+        initializer=[two_const],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    onnx.checker.check_model(model)
+    onnx.save(model, str(model_path))
+
+    status_code, data = call_api(
+        "POST",
+        "/tune",
+        {
+            "model_path": str(model_path),
+            "warmup_runs": 1,
+            "timed_runs": 5,
+            "batch_size": 1,
+            "metric": "latency_p50_ms",
+        },
+    )
+
+    assert status_code == 200
+    assert data["model_path"] == str(model_path)
+    assert data["metric"] == "latency_p50_ms"
+
+    # Baseline assertions
+    assert data["baseline"] is not None
+    assert data["baseline"]["success"] is True
+    assert data["baseline"]["correct"] is True
+    assert data["baseline"]["is_valid"] is True
+    assert data["baseline"]["latency_p50_ms"] > 0
+
+    # Candidates assertions
+    assert data["candidates_evaluated"] > 0
+    assert data["candidates_valid"] > 0
+    assert len(data["candidates"]) == data["candidates_evaluated"]
+
+    # Best candidate assertions
+    assert data["best"] is not None
+    assert data["best"]["success"] is True
+    assert data["best"]["correct"] is True
+    assert data["best"]["is_valid"] is True
+    assert data["best"]["latency_p50_ms"] > 0
+
+    # Speedup assertion
+    assert data["speedup"] is not None
+    assert data["speedup"] > 0
+    # Throughput improvement field should be present
+    assert "throughput_change_percent" in data
+    # Ensure no traceback leaked
+    assert "Traceback" not in json.dumps(data)
+
+
+def test_tune_real_model_integration_throughput_metric(tmp_path):
+    """End-to-end integration test optimizing for throughput_per_sec with real ONNX model."""
+    model_path = tmp_path / "tune_tp_add_two.onnx"
+    two_const = numpy_helper.from_array(np.array([2.0], dtype=np.float32), name="two")
+    add_node = helper.make_node("Add", inputs=["X", "two"], outputs=["Y"], name="add_node")
+    graph = helper.make_graph(
+        nodes=[add_node],
+        name="AddTwoGraph",
+        inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 4])],
+        outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 4])],
+        initializer=[two_const],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    onnx.checker.check_model(model)
+    onnx.save(model, str(model_path))
+
+    status_code, data = call_api(
+        "POST",
+        "/tune",
+        {
+            "model_path": str(model_path),
+            "warmup_runs": 1,
+            "timed_runs": 5,
+            "batch_size": 1,
+            "metric": "throughput_per_sec",
+        },
+    )
+
+    assert status_code == 200
+    assert data["model_path"] == str(model_path)
+    assert data["metric"] == "throughput_per_sec"
+
+    # Baseline assertions
+    assert data["baseline"] is not None
+    assert data["baseline"]["is_valid"] is True
+    assert data["baseline"]["throughput_per_sec"] is not None
+    assert data["baseline"]["throughput_per_sec"] > 0
+
+    # Best candidate assertions
+    assert data["best"] is not None
+    assert data["best"]["is_valid"] is True
+    assert data["best"]["throughput_per_sec"] is not None
+    assert data["best"]["throughput_per_sec"] > 0
+    assert data["best"]["latency_p50_ms"] is not None
+    assert data["best"]["latency_p50_ms"] > 0
+
+    # Candidates assertions
+    assert data["candidates_evaluated"] > 0
+    assert data["candidates_valid"] > 0
+    assert "throughput_change_percent" in data
+    assert data["throughput_change_percent"] is not None
+
+
+def test_tune_no_valid_candidates(tmp_path):
+    """When candidates fail correctness, select_best returns None and speedup is None."""
+    model_path = tmp_path / "tune_fail.onnx"
+    two_const = numpy_helper.from_array(np.array([2.0], dtype=np.float32), name="two")
+    add_node = helper.make_node("Add", inputs=["X", "two"], outputs=["Y"], name="add_node")
+    graph = helper.make_graph(
+        nodes=[add_node],
+        name="AddTwoGraph",
+        inputs=[helper.make_tensor_value_info("X", TensorProto.FLOAT, ["batch", 4])],
+        outputs=[helper.make_tensor_value_info("Y", TensorProto.FLOAT, ["batch", 4])],
+        initializer=[two_const],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+
+    onnx.checker.check_model(model)
+    onnx.save(model, str(model_path))
+
+    # Mock evaluate_config in optimizer adapter to simulate output divergence on all candidates
+    from inferbench.common.benchmarktypes import BenchmarkResult
+
+    def fake_failed_eval(config, baseline=None):
+        return BenchmarkResult(
+            config=config,
+            success=True,
+            correct=False,  # Fails correctness
+            latency_p50_ms=0.5,
+        )
+
+    with patch("inferbench.optimizer.adapter.evaluate_config", side_effect=fake_failed_eval):
+        status_code, data = call_api(
+            "POST",
+            "/tune",
+            {
+                "model_path": str(model_path),
+                "warmup_runs": 1,
+                "timed_runs": 5,
+            },
+        )
+
+    assert status_code == 200
+    assert data["candidates_evaluated"] > 0
+    assert data["candidates_valid"] == 0
+    assert data["best"] is None
+    assert data["speedup"] is None
+    assert data["throughput_change_percent"] is None
+
+
+def test_tune_unsupported_strategies_gated():
+    """Verify that unsupported optimizer strategies are not in the active tuning registry."""
+    from inferbench.optimizer.registry import get_tuning_registry
+
+    registry = get_tuning_registry()
+    names = registry.names()
+    assert "graph_optimization" in names
+    assert "cpu_thread_tuning" in names
+    assert "batching" not in names
+    assert "compilation" not in names
+    assert "memory" not in names
+    assert "precision" not in names
+
+
+def test_tune_baseline_execution_failure_handled(tmp_path):
+    """Corrupted model file during AutoTune reports failure gracefully without traceback."""
+    corrupted_model = tmp_path / "corrupted.onnx"
+    corrupted_model.write_bytes(b"not an onnx file")
+
+    status_code, data = call_api("POST", "/tune", {"model_path": str(corrupted_model)})
+
+    assert status_code == 200
+    assert data["best"] is None
+    assert data["speedup"] is None
+    assert data["throughput_change_percent"] is None
+    assert data["candidates_evaluated"] == 0
+    assert data["candidates_valid"] == 0
+    assert "Baseline run failed" in data["error_message"]
+    assert "Traceback" not in json.dumps(data)
