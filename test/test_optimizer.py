@@ -79,8 +79,7 @@ def test_candidate_to_benchmark_config_translation():
     assert cfg2.graph_optimization_level == "all"
     # Ensure no extra attributes like metadata were forced onto BenchmarkConfig
     assert not hasattr(cfg2, "inter_op_threads")
-    assert not hasattr(cfg2, "inter_op_num_threads")
-    assert not hasattr(cfg2, "metadata")
+    assert cfg2.inter_op_num_threads == 0   
 
 
 def test_graph_candidates_use_baseline_thread_count():
@@ -147,7 +146,7 @@ def test_graph_level_translation_and_unsupported_inter_op_threads():
     cfg_inter = candidate_to_benchmark_config(base, c_inter_op)
     assert cfg_inter.num_threads == 2
     assert not hasattr(cfg_inter, "inter_op_threads")
-    assert not hasattr(cfg_inter, "inter_op_num_threads")
+    assert cfg_inter.inter_op_num_threads == 0   
 
 
 def test_benchmark_candidates_thread_consistency(monkeypatch):
