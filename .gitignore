@@ -14,3 +14,5 @@ results/*
 .DS_Store
 Thumbs.db
 .vscode/
+
+*.egg-info/
