@@ -18,7 +18,7 @@ from inferbench.dashboard.api_client import (
 # Page configuration
 st.set_page_config(
     page_title="InferBench AutoTune",
-    page_icon="⚡",
+    page_icon=None,
     layout="wide",
 )
 
@@ -37,11 +37,11 @@ client = InferBenchApiClient(base_url=backend_url)
 health = client.check_health()
 
 if health.ok:
-    st.sidebar.success(f"🟢 **Connected**\n\nService: `{health.service}`\nStatus: `{health.status}`")
+    st.sidebar.success(f"**Connected**\n\nService: `{health.service}`\nStatus: `{health.status}`")
 else:
-    st.sidebar.error(f"🔴 **Offline / Unreachable**\n\n{health.error}")
+    st.sidebar.error(f"**Offline / Unreachable**\n\n{health.error}")
     st.warning(
-        f"⚠️ **FastAPI backend is unreachable at `{backend_url}`**.\n\n"
+        f"**FastAPI backend is unreachable at `{backend_url}`**.\n\n"
         "Please start the API backend from the project root:\n"
         "```bash\n"
         ".venv/bin/uvicorn inferbench.api.main:app --host 127.0.0.1 --port 8000\n"
@@ -55,7 +55,7 @@ discovered_models = discover_models("models")
 
 if not discovered_models:
     st.info(
-        "ℹ️ No `.onnx` models found in the `models/` directory. "
+        "No `.onnx` models found in the `models/` directory. "
         "You can specify a path manually below (relative to the repository root or absolute)."
     )
     model_path = st.text_input(
@@ -87,7 +87,7 @@ else:
 # Mode Selector
 workflow_mode = st.radio(
     "Workflow Mode",
-    ["⚡ AutoTune Optimization", "⏱️ Single Benchmark"],
+    ["AutoTune Optimization", "Single Benchmark"],
     horizontal=True,
     help="Choose whether to run automated multi-candidate tuning or evaluate a single manual configuration",
 )
@@ -102,7 +102,7 @@ def fmt_float(val, unit=""):
 # =========================================================================
 # Mode 1: AutoTune Optimization
 # =========================================================================
-if workflow_mode == "⚡ AutoTune Optimization":
+if workflow_mode == "AutoTune Optimization":
     st.subheader("2. AutoTune Configuration")
     st.info(
         "AutoTune systematically evaluates candidate graph optimization levels "
@@ -177,14 +177,14 @@ if workflow_mode == "⚡ AutoTune Optimization":
             )
 
     st.subheader("3. Execution & Results")
-    tune_btn = st.button("⚡ Run AutoTune Optimization", type="primary", use_container_width=True)
+    tune_btn = st.button("Run AutoTune Optimization", type="primary", use_container_width=True)
 
     if tune_btn:
         cleaned_path = model_path.strip() if model_path else ""
         if not cleaned_path:
-            st.error("❌ Please provide a model path before running AutoTune.")
+            st.error("Please provide a model path before running AutoTune.")
         elif not health.ok:
-            st.error(f"❌ Cannot run AutoTune: FastAPI backend at `{backend_url}` is offline.")
+            st.error(f"Cannot run AutoTune: FastAPI backend at `{backend_url}` is offline.")
         else:
             payload = {
                 "model_path": cleaned_path,
@@ -203,7 +203,7 @@ if workflow_mode == "⚡ AutoTune Optimization":
 
             if not response.ok:
                 st.error(
-                    f"❌ **AutoTune Request Failed"
+                    f"**AutoTune Request Failed"
                     + (f" (HTTP {response.status_code})" if response.status_code else "")
                     + f"**: {response.error}"
                 )
@@ -218,10 +218,10 @@ if workflow_mode == "⚡ AutoTune Optimization":
                 backend_err = data.get("error_message")
 
                 if backend_err:
-                    st.error(f"❌ **AutoTune Execution Failed**: {backend_err}")
+                    st.error(f"**AutoTune Execution Failed**: {backend_err}")
                 elif not best:
                     st.warning(
-                        "⚠️ **No Valid Candidates Found**: None of the evaluated candidate configurations "
+                        "**No Valid Candidates Found**: None of the evaluated candidate configurations "
                         "passed execution and correctness checks against the baseline."
                     )
                 else:
@@ -232,12 +232,12 @@ if workflow_mode == "⚡ AutoTune Optimization":
                         primary_val_str = format_throughput_change(tp_change)
                         if primary_val_str != "N/A":
                             success_msg = (
-                                f"🎉 **AutoTune Complete!** Best candidate achieved **{primary_val_str}** "
+                                f"**AutoTune Complete!** Best candidate achieved **{primary_val_str}** "
                                 f"Throughput Change vs Baseline ({valid_count}/{eval_count} candidates valid)."
                             )
                         else:
                             success_msg = (
-                                f"🎉 **AutoTune Complete!** Best candidate selected by throughput "
+                                f"**AutoTune Complete!** Best candidate selected by throughput "
                                 f"({valid_count}/{eval_count} candidates valid)."
                             )
                     else:  # latency_p50_ms
@@ -248,12 +248,12 @@ if workflow_mode == "⚡ AutoTune Optimization":
                         primary_val_str = format_latency_speedup(speedup_val)
                         if primary_val_str != "N/A":
                             success_msg = (
-                                f"🎉 **AutoTune Complete!** Best candidate achieved **{primary_val_str}** "
+                                f"**AutoTune Complete!** Best candidate achieved **{primary_val_str}** "
                                 f"Latency Speedup vs Baseline ({valid_count}/{eval_count} candidates valid)."
                             )
                         else:
                             success_msg = (
-                                f"🎉 **AutoTune Complete!** Best candidate selected by median latency "
+                                f"**AutoTune Complete!** Best candidate selected by median latency "
                                 f"({valid_count}/{eval_count} candidates valid)."
                             )
 
@@ -272,7 +272,7 @@ if workflow_mode == "⚡ AutoTune Optimization":
                         st.metric("Best Throughput", fmt_float(best.get("throughput_per_sec"), "runs/s"))
 
                     # Best candidate summary
-                    st.markdown("### 🏆 Winning Configuration")
+                    st.markdown("### Winning Configuration")
                     best_cfg = best.get("config", {})
                     w1, w2, w3, w4 = st.columns(4)
                     with w1:
@@ -286,17 +286,17 @@ if workflow_mode == "⚡ AutoTune Optimization":
                         st.write(f"**Max Abs Diff:** `{max_diff:.2e}`" if isinstance(max_diff, (int, float)) else f"**Max Abs Diff:** `{max_diff}`")
 
                     # Candidates Table
-                    st.markdown(f"### 📊 Candidate Exploration Summary ({valid_count}/{eval_count} Valid)")
+                    st.markdown(f"### Candidate Exploration Summary ({valid_count}/{eval_count} Valid)")
                     rows = []
                     for idx, c in enumerate(candidates, start=1):
                         cfg = c.get("config", {})
                         is_best = (best and cfg == best_cfg)
                         rows.append({
-                            "#": f"🏆 {idx}" if is_best else str(idx),
+                            "#": f"{idx}" if is_best else str(idx),
                             "Graph Opt": cfg.get("graph_optimization_level", "-"),
                             "Threads": cfg.get("num_threads", "-"),
-                            "Valid": "✅ Yes" if c.get("is_valid") else "❌ No",
-                            "Correct": "✅" if c.get("correct") else ("❌" if c.get("correct") is False else "-"),
+                            "Valid": "Yes" if c.get("is_valid") else "❌ No",
+                            "Correct": "Pass" if c.get("correct") else ("❌" if c.get("correct") is False else "-"),
                             "P50 Latency": fmt_ms(c.get("latency_p50_ms")),
                             "Mean Latency": fmt_ms(c.get("latency_mean_ms")),
                             "Throughput": fmt_float(c.get("throughput_per_sec"), "runs/s"),
@@ -306,7 +306,7 @@ if workflow_mode == "⚡ AutoTune Optimization":
 
                     # Environment details
                     env = best.get("environment", {})
-                    with st.expander("🖥️ Machine & Environment Information"):
+                    with st.expander("Machine & Environment Information"):
                         if env:
                             e1, e2 = st.columns(2)
                             with e1:
@@ -320,7 +320,7 @@ if workflow_mode == "⚡ AutoTune Optimization":
                     # JSON Download
                     stem = Path(cleaned_path).stem or "model"
                     st.download_button(
-                        label="📥 Download AutoTune Results (JSON)",
+                        label="Download AutoTune Results (JSON)",
                         data=json.dumps(data, indent=2),
                         file_name=f"autotune_{stem}_{int(time.time())}.json",
                         mime="application/json",
@@ -409,14 +409,14 @@ else:
             )
 
     st.subheader("3. Execution & Results")
-    run_btn = st.button("🚀 Run Benchmark", type="primary", use_container_width=True)
+    run_btn = st.button("Run Benchmark", type="primary", use_container_width=True)
 
     if run_btn:
         cleaned_path = model_path.strip() if model_path else ""
         if not cleaned_path:
-            st.error("❌ Please provide a model path before running the benchmark.")
+            st.error("Please provide a model path before running the benchmark.")
         elif not health.ok:
-            st.error(f"❌ Cannot run benchmark: FastAPI backend at `{backend_url}` is offline.")
+            st.error(f"Cannot run benchmark: FastAPI backend at `{backend_url}` is offline.")
         else:
             payload = {
                 "model_path": cleaned_path,
@@ -436,7 +436,7 @@ else:
 
             if not response.ok:
                 st.error(
-                    f"❌ **API Request Failed"
+                    f"**API Request Failed"
                     + (f" (HTTP {response.status_code})" if response.status_code else "")
                     + f"**: {response.error}"
                 )
@@ -449,16 +449,16 @@ else:
 
                 # Status Banner - clearly distinguishing success vs is_valid
                 if not success:
-                    st.error(f"❌ **Benchmark Failed During Execution**: {error_message or 'Unknown backend error'}")
+                    st.error(f"**Benchmark Failed During Execution**: {error_message or 'Unknown backend error'}")
                 elif not is_valid:
                     st.warning(
-                        "⚠️ **Benchmark Completed with Invalid Output**: The execution completed (`success=True`), "
+                        "**Benchmark Completed with Invalid Output**: The execution completed (`success=True`), "
                         f"but correctness verification failed (`correct={correct}`). The candidate's output diverged "
                         "from the baseline run, so `is_valid=False`."
                     )
                 else:
                     st.success(
-                        "✅ **Benchmark Successful and Valid**: The run finished without errors (`success=True`) "
+                        "**Benchmark Successful and Valid**: The run finished without errors (`success=True`) "
                         f"and output values matched baseline within tolerances (`correct={correct}`, `is_valid=True`)."
                     )
 
@@ -501,7 +501,7 @@ else:
 
                 # Expandable Environment Details
                 env = result.get("environment", {})
-                with st.expander("🖥️ Machine & Environment Information"):
+                with st.expander("Machine & Environment Information"):
                     if env:
                         e_col1, e_col2 = st.columns(2)
                         with e_col1:
@@ -517,7 +517,7 @@ else:
                 # JSON Download Button
                 stem = Path(cleaned_path).stem or "model"
                 st.download_button(
-                    label="📥 Download Benchmark Result (JSON)",
+                    label="Download Benchmark Result (JSON)",
                     data=json.dumps(result, indent=2),
                     file_name=f"benchmark_{stem}_{int(time.time())}.json",
                     mime="application/json",
