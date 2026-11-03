@@ -14,3 +14,7 @@ results/*
 .DS_Store
 Thumbs.db
 .vscode/
+
+# ONNX model files
+*.onnx
+*.onnx.data
