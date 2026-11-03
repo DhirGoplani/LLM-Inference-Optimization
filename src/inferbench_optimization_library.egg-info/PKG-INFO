@@ -1,0 +1,10 @@
+Metadata-Version: 2.4
+Name: inferbench-optimization-library
+Version: 0.1.0
+Summary: Plugin-based optimization strategy library for InferBench AutoTune
+Requires-Python: >=3.12
+Provides-Extra: onnx
+Requires-Dist: onnx>=1.16; extra == "onnx"
+Requires-Dist: onnxruntime>=1.18; extra == "onnx"
+Provides-Extra: test
+Requires-Dist: pytest>=8; extra == "test"

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field, asdict
-from typing import Optional
+from typing import Any, Optional
 
 
 
@@ -7,16 +7,19 @@ from typing import Optional
 class BenchmarkConfig:
     model_path: str
     execution_provider: str = "CPUExecutionProvider"
+    execution_providers: Optional[tuple[str, ...]] = None
     graph_optimization_level: str = "all"
     num_threads: int = 0
     inter_op_num_threads: int = 0
+    execution_mode: str = "sequential"
+    enable_mem_pattern: bool = True
     batch_size: int = 1
     warmup_runs: int = 10
     timed_runs: int = 100
     rel_tol: float = 1e-3
     abs_tol: float = 1e-5
     seed: int = 0
-
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class BenchmarkResult:
