@@ -16,3 +16,6 @@ Thumbs.db
 .vscode/
 
 *.egg-info/
+# ONNX model files
+*.onnx
+*.onnx.data
