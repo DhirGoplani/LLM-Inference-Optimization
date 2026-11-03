@@ -44,6 +44,7 @@ def create_session(model_path, config=None):
 
     threads = _cfg(config, "num_threads", 0)  # 0 = let ONNX Runtime decide
     options.intra_op_num_threads = int(threads)
+    options.inter_op_num_threads = int(_cfg(config, "inter_op_num_threads", 0))
 
     levels = {
         "disable": ort.GraphOptimizationLevel.ORT_DISABLE_ALL,
@@ -52,13 +53,29 @@ def create_session(model_path, config=None):
         "all": ort.GraphOptimizationLevel.ORT_ENABLE_ALL,
     }
     level_name = str(_cfg(config, "graph_optimization_level", "all")).lower()
+    level_name = {
+        "ort_disable_all": "disable",
+        "ort_enable_basic": "basic",
+        "ort_enable_extended": "extended",
+        "ort_enable_all": "all",
+    }.get(level_name, level_name)
     options.graph_optimization_level = levels.get(level_name, ort.GraphOptimizationLevel.ORT_ENABLE_ALL)
 
-    single = getattr(config, "execution_provider", None)
-    if single:
-        providers = [single]
+    mode = str(_cfg(config, "execution_mode", "sequential")).lower()
+    modes = {
+        "ort_sequential": ort.ExecutionMode.ORT_SEQUENTIAL,
+        "sequential": ort.ExecutionMode.ORT_SEQUENTIAL,
+        "ort_parallel": ort.ExecutionMode.ORT_PARALLEL,
+        "parallel": ort.ExecutionMode.ORT_PARALLEL,
+    }
+    options.execution_mode = modes.get(mode, ort.ExecutionMode.ORT_SEQUENTIAL)
+    options.enable_mem_pattern = bool(_cfg(config, "enable_mem_pattern", True))
+
+    configured_providers = getattr(config, "execution_providers", None)
+    if configured_providers:
+        providers = configured_providers
     else:
-        providers = _cfg(config, "providers", ["CPUExecutionProvider"])
+        providers = [_cfg(config, "execution_provider", "CPUExecutionProvider")]
     return ort.InferenceSession(str(model_path), sess_options=options, providers=list(providers))
 
 
