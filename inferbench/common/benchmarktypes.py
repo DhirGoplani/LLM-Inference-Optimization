@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+
+
 @dataclass
 class BenchmarkConfig:
     model_path: str

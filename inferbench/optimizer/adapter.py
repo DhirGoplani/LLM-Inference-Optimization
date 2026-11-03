@@ -116,11 +116,15 @@ def run_autotune(
     *,
     metric: Literal["latency_p50_ms", "throughput_per_sec"] = "latency_p50_ms",
     strategy_names: Iterable[str] | None = None,
+    context: OptimizationContext | None = None,
 ) -> dict[str, Any]:
     """Execute complete AutoTune optimization workflow for a model."""
-    context = OptimizationContext(
-        execution_providers=(base_config.execution_provider,),
-    )
+    if context is None:
+        context = OptimizationContext(
+            execution_providers=(
+                base_config.execution_provider,
+            ),
+        )
     registry = get_tuning_registry()
     strategies_to_run = strategy_names if strategy_names is not None else ("graph_optimization", "cpu_thread_tuning")
     candidates, skipped = registry.generate_candidates(context, strategy_names=strategies_to_run)
