@@ -67,3 +67,55 @@ def compare_outputs(baseline, optimized, rtol=1e-3, atol=1e-5):
         "max_rel_diff": max_rel,
         "details": details,
     }
+
+
+def compare_quality(reference_runs, candidate_runs, min_cosine=0.99, min_top1=0.90):
+    """Judge a quantized model by how close it stays to the FP32 model.
+
+    reference_runs / candidate_runs: one entry per evaluation sample, each entry
+    being the list of output arrays from session.run(). Only the FIRST output is
+    used, and it is treated as class scores for the top-1 check.
+
+    A model passes when its worst cosine similarity is >= min_cosine AND the
+    fraction of samples with the same top-1 prediction is >= min_top1.
+    """
+    n = len(reference_runs)
+    if n == 0 or n != len(candidate_runs):
+        return {
+            "passed": False,
+            "max_abs_diff": float("inf"),
+            "error": "Reference and candidate runs are empty or differ in length",
+        }
+
+    cosines = []
+    agree = 0
+    max_abs = 0.0
+    for ref, cand in zip(reference_runs, candidate_runs):
+        a = np.asarray(ref[0], dtype=np.float64).ravel()
+        b = np.asarray(cand[0], dtype=np.float64).ravel()
+
+        if a.shape != b.shape or not (np.isfinite(a).all() and np.isfinite(b).all()):
+            cosines.append(0.0)
+            max_abs = float("inf")
+            continue
+
+        denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+        if denom == 0.0:
+            cosines.append(1.0 if not a.any() and not b.any() else 0.0)
+        else:
+            cosines.append(float(np.dot(a, b) / denom))
+        agree += int(np.argmax(a) == np.argmax(b))
+        max_abs = max(max_abs, float(np.max(np.abs(a - b))))
+
+    cosine_min = min(cosines)
+    top1 = agree / n
+    return {
+        "passed": bool(cosine_min >= min_cosine and top1 >= min_top1),
+        "max_abs_diff": max_abs,
+        "cosine_min": cosine_min,
+        "cosine_mean": float(np.mean(cosines)),
+        "top1_agreement": top1,
+        "n_eval_samples": n,
+        "min_cosine": min_cosine,
+        "min_top1": min_top1,
+    }

@@ -9,7 +9,15 @@ models/*.onnx.data
 results/*
 !models/.gitkeep
 !results/.gitkeep
+.history/
 
 .DS_Store
 Thumbs.db
 .vscode/
+
+*.egg-info/
+# ONNX model files
+*.onnx
+*.onnx.data
+
+calibration/

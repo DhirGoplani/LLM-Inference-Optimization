@@ -12,6 +12,10 @@ dependencies = [
     "onnx>=1.16",
     "onnxruntime>=1.18",
     "psutil",
+    "fastapi",
+    "uvicorn",
+    "streamlit",
+    "requests",
 ]
 
 [project.optional-dependencies]
@@ -21,7 +25,7 @@ modelgen = ["torch", "torchvision", "onnxscript"]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]
-include = ["inferbench*", "inferbench_optimizers*"]
+include = ["inferbench*", "inferbench_optimizers*", "models*"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "src"]
