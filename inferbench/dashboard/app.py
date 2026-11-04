@@ -14,6 +14,8 @@ from inferbench.dashboard.api_client import (
     format_latency_speedup,
     format_throughput_change,
 )
+from models.inspection import inspect_model_configuration
+from models.provider_diagnostics import diagnose_execution_providers
 
 # Page configuration
 st.set_page_config(
@@ -83,6 +85,154 @@ else:
             placeholder="e.g. models/mobilenet_v2.onnx or /path/to/model.onnx",
             help="Path to the ONNX model file (relative or absolute)",
         )
+
+# Model Inspection & Diagnostics Section
+with st.expander("Model Inspection & Diagnostics", expanded=False):
+    if not model_path or not model_path.strip():
+        st.info("Select or enter a valid ONNX model path above to inspect model architecture and diagnostics.")
+    else:
+        col_inspect, col_diag = st.columns([1, 1])
+        with col_inspect:
+            inspect_clicked = st.button("Inspect Model", key="btn_inspect_model")
+        with col_diag:
+            diag_clicked = st.button("Run Provider Diagnostics", key="btn_run_diagnostics")
+
+        if inspect_clicked:
+            with st.spinner("Inspecting ONNX model graph and runtime configuration..."):
+                try:
+                    insp_data = inspect_model_configuration(model_path)
+                    st.session_state["inspection_model_path"] = model_path
+                    st.session_state["inspection_data"] = insp_data
+                    st.session_state["inspection_error"] = None
+                except Exception as exc:
+                    st.session_state["inspection_model_path"] = model_path
+                    st.session_state["inspection_data"] = None
+                    st.session_state["inspection_error"] = f"{type(exc).__name__}: {exc}"
+
+        if diag_clicked:
+            with st.spinner("Running execution provider diagnostics..."):
+                try:
+                    diag_data = diagnose_execution_providers(model_path)
+                    st.session_state["diagnostics_model_path"] = model_path
+                    st.session_state["diagnostics_data"] = diag_data
+                    st.session_state["diagnostics_error"] = None
+                except Exception as exc:
+                    st.session_state["diagnostics_model_path"] = model_path
+                    st.session_state["diagnostics_data"] = None
+                    st.session_state["diagnostics_error"] = f"{type(exc).__name__}: {exc}"
+
+        # Display Inspection Results if available for current model path
+        if st.session_state.get("inspection_model_path") == model_path:
+            if st.session_state.get("inspection_error"):
+                st.error(f"Inspection Failed: {st.session_state['inspection_error']}")
+            elif st.session_state.get("inspection_data"):
+                insp = st.session_state["inspection_data"]
+                st.markdown("#### Model Specification & Architecture")
+
+                col_stat, col_ops, col_count = st.columns(3)
+                with col_stat:
+                    status_text = (
+                        "Session Created"
+                        if insp.get("runtime_status") == "session_created"
+                        else "Session Creation Failed"
+                    )
+                    st.metric("Runtime Status", status_text)
+                with col_ops:
+                    opsets = insp.get("opsets", [])
+                    opset_str = (
+                        ", ".join(
+                            f"{op.get('domain', 'ai.onnx')} v{op.get('version', '')}"
+                            for op in opsets
+                        )
+                        if opsets
+                        else "N/A"
+                    )
+                    st.metric("ONNX Opset", opset_str)
+                with col_count:
+                    op_count = len(insp.get("operators", []))
+                    st.metric("Unique Operators", f"{op_count}")
+
+                warnings = insp.get("warnings", [])
+                if warnings:
+                    st.markdown("**Model Warnings**")
+                    for w in warnings:
+                        st.warning(w)
+
+                st.markdown("**Input Signatures**")
+                inputs = insp.get("inputs", [])
+                if inputs:
+                    input_rows = [
+                        {
+                            "Name": item.get("name", ""),
+                            "Shape": str(item.get("shape", [])),
+                            "Data Type": item.get("dtype", ""),
+                        }
+                        for item in inputs
+                    ]
+                    st.dataframe(input_rows, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No graph inputs detected.")
+
+                st.markdown("**Output Signatures**")
+                outputs = insp.get("outputs", [])
+                if outputs:
+                    output_rows = [
+                        {
+                            "Name": item.get("name", ""),
+                            "Shape": str(item.get("shape", [])),
+                            "Data Type": item.get("dtype", ""),
+                        }
+                        for item in outputs
+                    ]
+                    st.dataframe(output_rows, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No graph outputs detected.")
+
+                operators = insp.get("operators", [])
+                if operators:
+                    with st.expander(f"View All {len(operators)} Unique Operators", expanded=False):
+                        st.write(", ".join(f"`{op}`" for op in operators))
+
+        # Display Provider Diagnostics if available for current model path
+        if st.session_state.get("diagnostics_model_path") == model_path:
+            if st.session_state.get("diagnostics_error"):
+                st.error(f"Diagnostics Failed: {st.session_state['diagnostics_error']}")
+            elif st.session_state.get("diagnostics_data"):
+                diag = st.session_state["diagnostics_data"]
+                st.markdown("---")
+                st.markdown("#### Execution Provider Diagnostics")
+
+                diag_results = diag.get("results", [])
+                if diag_results:
+                    diag_rows = []
+                    for r in diag_results:
+                        observed = (
+                            ", ".join(
+                                f"{k}: {v}"
+                                for k, v in r.get("observed_node_providers", {}).items()
+                            )
+                            or "None"
+                        )
+                        sess_provs = ", ".join(r.get("session_providers", [])) or "None"
+                        diag_rows.append({
+                            "Provider": r.get("provider", ""),
+                            "Session Created": "Yes" if r.get("session_created") else "No",
+                            "Inference Succeeded": "Yes" if r.get("inference_succeeded") else "No",
+                            "Session Providers": sess_provs,
+                            "Observed Node Providers": observed,
+                            "Error": r.get("error") or "None",
+                        })
+                    st.dataframe(diag_rows, use_container_width=True, hide_index=True)
+                else:
+                    st.caption("No diagnostic results available.")
+
+                note = diag.get("note", "")
+                if note:
+                    st.info(
+                        f"**Diagnostic Note**:\n\n{note}\n\n"
+                        f"*Zero-valued sample inputs were used for this diagnostic test inference. "
+                        f"Observed provider assignments apply only to this test run.*"
+                    )
 
 # Mode Selector
 workflow_mode = st.radio(
