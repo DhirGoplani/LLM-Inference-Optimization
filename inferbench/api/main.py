@@ -149,20 +149,42 @@ class TuneRequest(BaseModel):
         default="latency_p50_ms",
         description="Target metric to optimize: latency_p50_ms or throughput_per_sec",
     )
+    include_quantization: bool = Field(
+        default=False,
+        description="Also try INT8 quantized variants (needs calibration_data_path)",
+    )
+    calibration_data_path: str | None = Field(
+        default=None,
+        description="Path to an .npz of real input samples, keyed by model input name",
+    )
+    min_cosine: float = Field(
+        default=0.99,
+        ge=0.0,
+        le=1.0,
+        description="Minimum cosine similarity to FP32 outputs for an INT8 model to be accepted",
+    )
+    min_top1: float = Field(
+        default=0.90,
+        ge=0.0,
+        le=1.0,
+        description="Minimum fraction of samples whose top-1 prediction matches FP32",
+    )
 
 
 @app.post(
     "/tune",
     responses={
         status.HTTP_400_BAD_REQUEST: {
-            "description": "Model path is empty, does not exist, or is not a file",
+            "description": "Model path is empty, does not exist, or is not a file; "
+            "or quantization was requested without a valid calibration file",
         },
     },
 )
 def run_tune_endpoint(request: TuneRequest) -> Dict[str, Any]:
     """Execute AutoTune candidate exploration and select the best valid configuration.
 
-    Returns HTTP 400 when the model path is missing, does not exist, or is not a regular file.
+    Returns HTTP 400 when the model path is missing, does not exist, or is not a regular file,
+    or when INT8 quantization is requested without an existing calibration samples file.
     """
     cleaned_path = request.model_path.strip()
     if not cleaned_path:
@@ -183,6 +205,20 @@ def run_tune_endpoint(request: TuneRequest) -> Dict[str, Any]:
             detail=f"Model path is not a file: {cleaned_path}",
         )
 
+    calibration_path = None
+    if request.include_quantization:
+        calibration_path = (request.calibration_data_path or "").strip()
+        if not calibration_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="calibration_data_path is required when include_quantization is true",
+            )
+        if not Path(calibration_path).is_file():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Calibration data file does not exist: {calibration_path}",
+            )
+
     base_config = BenchmarkConfig(
         model_path=cleaned_path,
         execution_provider=request.execution_provider,
@@ -196,8 +232,19 @@ def run_tune_endpoint(request: TuneRequest) -> Dict[str, Any]:
         seed=request.seed,
     )
 
+    # Extra arguments are only passed when quantization is requested, so existing
+    # callers and tests that mock run_autotune(base_config, metric=...) keep working.
+    tune_kwargs: Dict[str, Any] = {"metric": request.metric}
+    if request.include_quantization:
+        tune_kwargs.update(
+            quantization=True,
+            calibration_path=calibration_path,
+            min_cosine=request.min_cosine,
+            min_top1=request.min_top1,
+        )
+
     try:
-        tune_result = run_autotune(base_config, metric=request.metric)
+        tune_result = run_autotune(base_config, **tune_kwargs)
     except Exception as exc:
         tune_result = {
             "model_path": cleaned_path,

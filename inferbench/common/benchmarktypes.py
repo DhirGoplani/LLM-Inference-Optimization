@@ -48,6 +48,10 @@ class BenchmarkResult:
     # Environment info (OS, CPU, versions)
     environment: dict = field(default_factory=dict)
 
+    # Added for quantization
+    model_size_mb: Optional[float] = None   # size of the model file(s) on disk
+    accuracy: dict = field(default_factory=dict)  # quality metrics (cosine, top-1) for INT8 candidates
+
     @property
     def is_valid(self) -> bool:
         """True only if it ran AND the output is correct."""

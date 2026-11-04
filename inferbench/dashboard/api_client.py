@@ -11,6 +11,7 @@ DEFAULT_API_URL = "http://127.0.0.1:8000"
 DEFAULT_BENCHMARK_TIMEOUT = 120.0
 DEFAULT_TUNE_TIMEOUT = 300.0
 DEFAULT_HEALTH_TIMEOUT = 5.0
+DEFAULT_TUNE_TIMEOUT = 600.0
 
 
 def discover_models(models_dir: str = "models") -> List[str]:

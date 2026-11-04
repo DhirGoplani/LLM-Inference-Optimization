@@ -299,6 +299,36 @@ if workflow_mode == "AutoTune Optimization":
             help="Timed iterations per candidate",
         )
 
+    use_quantization = st.checkbox(
+        "Include INT8 quantization candidates",
+        value=False,
+        help=(
+            "Builds INT8 versions of the model and keeps one only if its outputs stay close "
+            "to FP32 on your calibration samples."
+        ),
+    )
+    calibration_path = ""
+    min_cosine = 0.99
+    min_top1 = 0.90
+    if use_quantization:
+        q_col1, q_col2, q_col3 = st.columns(3)
+        with q_col1:
+            calibration_path = st.text_input(
+                "Calibration samples (.npz)",
+                value="calibration/samples.npz",
+                help="Real input samples, path relative to where the API server runs",
+            )
+        with q_col2:
+            min_cosine = st.number_input(
+                "Min cosine similarity", min_value=0.0, max_value=1.0,
+                value=0.99, step=0.001, format="%.3f",
+            )
+        with q_col3:
+            min_top1 = st.number_input(
+                "Min top-1 agreement", min_value=0.0, max_value=1.0,
+                value=0.90, step=0.01, format="%.2f",
+            )
+
     with st.expander("Advanced Settings (Tolerances & Random Seed)"):
         adv_col1, adv_col2, adv_col3 = st.columns(3)
         with adv_col1:
@@ -347,6 +377,13 @@ if workflow_mode == "AutoTune Optimization":
                 "abs_tol": float(abs_tol),
                 "seed": int(seed),
             }
+            if use_quantization:
+                payload.update({
+                    "include_quantization": True,
+                    "calibration_data_path": calibration_path.strip(),
+                    "min_cosine": float(min_cosine),
+                    "min_top1": float(min_top1),
+                })
 
             with st.spinner("Running AutoTune candidate exploration and correctness verification..."):
                 response = client.run_tune(payload)
@@ -435,14 +472,32 @@ if workflow_mode == "AutoTune Optimization":
                         max_diff = best.get("max_abs_diff")
                         st.write(f"**Max Abs Diff:** `{max_diff:.2e}`" if isinstance(max_diff, (int, float)) else f"**Max Abs Diff:** `{max_diff}`")
 
+                    best_meta = best_cfg.get("metadata") or {}
+                    st.write(
+                        f"**Precision:** `{best_meta.get('precision', 'fp32')}`"
+                        + (f" (`{best_meta['method']}`)" if best_meta.get("method") else "")
+                        + f"  |  **Model size:** {fmt_float(best.get('model_size_mb'), 'MB')}"
+                    )
+                    q_gain = data.get("quantization_speedup_vs_best_fp32")
+                    if q_gain is not None:
+                        st.caption(
+                            f"Best INT8 vs best FP32 settings: {q_gain:.2f}x latency "
+                            "(above 1.00x means INT8 is faster)."
+                        )
+
                     # Candidates Table
                     st.markdown(f"### Candidate Exploration Summary ({valid_count}/{eval_count} Valid)")
                     rows = []
                     for idx, c in enumerate(candidates, start=1):
                         cfg = c.get("config", {})
-                        is_best = (best and cfg == best_cfg)
+                        meta = cfg.get("metadata") or {}
+                        acc = c.get("accuracy") or {}
+                        precision = meta.get("precision", "fp32")
+                        if meta.get("method"):
+                            precision = f"{precision} ({meta['method']})"
                         rows.append({
-                            "#": f"{idx}" if is_best else str(idx),
+                            "#": str(idx),
+                            "Precision": precision,
                             "Graph Opt": cfg.get("graph_optimization_level", "-"),
                             "Threads": cfg.get("num_threads", "-"),
                             "Valid": "Yes" if c.get("is_valid") else "❌ No",
@@ -451,6 +506,15 @@ if workflow_mode == "AutoTune Optimization":
                             "Mean Latency": fmt_ms(c.get("latency_mean_ms")),
                             "Throughput": fmt_float(c.get("throughput_per_sec"), "runs/s"),
                             "Peak Memory": fmt_float(c.get("peak_memory_mb"), "MB"),
+                            "Size": fmt_float(c.get("model_size_mb"), "MB"),
+                            "Top-1 Match": (
+                                f"{acc['top1_agreement'] * 100:.0f}%"
+                                if acc.get("top1_agreement") is not None else "-"
+                            ),
+                            "Cosine (min)": (
+                                f"{acc['cosine_min']:.4f}"
+                                if acc.get("cosine_min") is not None else "-"
+                            ),
                         })
                     st.dataframe(rows, use_container_width=True)
 

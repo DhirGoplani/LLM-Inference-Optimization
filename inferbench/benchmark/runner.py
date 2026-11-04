@@ -3,7 +3,7 @@
 import dataclasses
 import platform
 import time
-
+from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
@@ -183,6 +183,19 @@ def get_environment(session=None):
     }
 
 
+def model_size_mb(model_path):
+    """Size of the model on disk in MB, including a sibling .onnx.data file if present."""
+    if not model_path:
+        return None
+    path = Path(model_path)
+    if not path.is_file():
+        return None
+    total = path.stat().st_size
+    external = Path(str(path) + ".data")
+    if external.is_file():
+        total += external.stat().st_size
+    return round(total / (1024 * 1024), 2)
+
 def to_benchmark_result(data, config=None, correctness=None):
     """Turn the runner's dict into the shared BenchmarkResult.
 
@@ -240,23 +253,34 @@ def make_baseline(config):
     result = to_benchmark_result(data, base_cfg, compare_outputs(outputs, outputs))
     return Baseline(config=base_cfg, result=result, outputs=outputs, inputs=inputs)
 
-
-def evaluate_config(config, baseline=None):
+def evaluate_config(config, baseline=None, correctness_override=None):
     """Benchmark one config AND check it against the baseline.
 
     Always returns a BenchmarkResult and never raises:
       - crashed            -> success=False, error_message filled in
       - wrong outputs      -> success=True, correct=False  (is_valid is False)
       - fast and correct   -> success=True, correct=True   (is_valid is True)
+
+    correctness_override: a ready-made check dict (keys "passed", "max_abs_diff", ...)
+    used instead of the strict output comparison. Quantized models use this, because
+    their outputs legitimately differ from FP32 and are judged by accuracy instead.
     """
     try:
         if baseline is None:
             baseline = make_baseline(config)
         data, outputs, _ = run_benchmark(config.model_path, config, inputs=baseline.inputs)
-        check = compare_outputs(
-            baseline.outputs, outputs,
-            rtol=_cfg(config, "rel_tol", 1e-3), atol=_cfg(config, "abs_tol", 1e-5),
-        )
-        return to_benchmark_result(data, config, check)
+        if correctness_override is not None:
+            check = correctness_override
+        else:
+            check = compare_outputs(
+                baseline.outputs, outputs,
+                rtol=_cfg(config, "rel_tol", 1e-3), atol=_cfg(config, "abs_tol", 1e-5),
+            )
+        result = to_benchmark_result(data, config, check)
+        if correctness_override is not None:
+            result.accuracy = {
+                k: v for k, v in check.items() if k not in ("passed", "max_abs_diff")
+            }
+        return result
     except Exception as exc:  # a bad config must not stop the whole search
         return failed_result(config, f"{type(exc).__name__}: {exc}")
