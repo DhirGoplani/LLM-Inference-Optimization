@@ -15,3 +15,4 @@ class ModelSpec:
     available_providers: list[str] = field(default_factory=list)
     compatible_providers: list[str] = field(default_factory=list)
     observed_execution_providers: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
