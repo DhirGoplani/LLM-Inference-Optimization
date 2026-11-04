@@ -12,6 +12,7 @@ from typing import Any, Protocol
 import numpy as np
 import onnxruntime as ort
 
+from models.batching import BatchConfig, BatchMetrics, BatchRequest, form_batch_indices
 from models.llm_inputs import create_prefill_feed
 from models.loader import load_llm_model
 from models.tokenizer import decode_tokens as decode_model_tokens
@@ -251,6 +252,7 @@ class OnnxTextGenerator:
             source_metadata = model_spec.metadata
         self.model_metadata = build_model_metadata(self.session, source_metadata)
         self.metadata = self.model_metadata.cache
+        self.last_batch_metrics: tuple[BatchMetrics, ...] = ()
         inputs = {item.name: item for item in self.session.get_inputs()}
         self._input_ids = next((name for name in inputs if name.lower() == "input_ids"
                                 or "input_ids" in name.lower()), None)
@@ -266,6 +268,10 @@ class OnnxTextGenerator:
             return _token_ids(encoded["input_ids"])
         except (TypeError, ValueError, KeyError):
             return _token_ids(self.tokenizer(prompt))
+
+    def count_prompt_tokens(self, prompt: str) -> int:
+        """Return the tokenized prompt length for request schedulers."""
+        return len(self._encode(prompt))
 
     def _cache_zeros(self, batch_size: int) -> dict[str, np.ndarray]:
         feeds: dict[str, np.ndarray] = {}
@@ -415,9 +421,356 @@ class OnnxTextGenerator:
             prefill_latency_ms=first_ms,
         )
 
-    def generate_batch(self, requests: list[GenerationRequest]) -> list[GenerationResult]:
-        """Reserved integration point for the batching contributor."""
-        raise NotImplementedError(
-            "Batch generation is not implemented yet; use generate(request) "
-            "for single-request generation."
+    def generate_batch(
+        self,
+        requests: list[GenerationRequest],
+        batch_config: BatchConfig | None = None,
+    ) -> list[GenerationResult]:
+        """Generate requests in same-bucket batches while preserving input order."""
+        self.last_batch_metrics = ()
+        if not requests:
+            return []
+        if any(not isinstance(request, GenerationRequest) for request in requests):
+            raise TypeError("requests must contain only GenerationRequest instances")
+
+        config = batch_config or BatchConfig()
+        formation_started = time.perf_counter()
+        prompt_ids = [self._encode(request.prompt) for request in requests]
+        input_shape = self._inputs[self._input_ids].shape
+        if len(input_shape) > 1 and isinstance(input_shape[1], int) and input_shape[1] > 0:
+            for encoded in prompt_ids:
+                if len(encoded) > input_shape[1]:
+                    raise ValueError(
+                        f"Prompt has {len(encoded)} tokens, but the ONNX model "
+                        f"supports at most {input_shape[1]}"
+                    )
+
+        for request in requests:
+            if request.config.use_cache and not self.metadata.available:
+                raise IncompatibleModelError(
+                    "Cached generation requested, but the ONNX model exposes no compatible "
+                    "past_key_values/present_key_values interface; use use_cache=False "
+                    "or export the model with KV-cache inputs and outputs."
+                )
+
+        static_batch_sizes = [
+            item.shape[0]
+            for name, item in self._inputs.items()
+            if (
+                name == self._input_ids or name in self.metadata.past_names
+            )
+            and item.shape
+            and isinstance(item.shape[0], int)
+            and item.shape[0] > 0
+        ]
+        static_batch_sizes.extend(
+            item.shape[0]
+            for item in self.session.get_outputs()
+            if item.shape
+            and isinstance(item.shape[0], int)
+            and item.shape[0] > 0
         )
+        effective_batch_size = min(
+            [config.max_batch_size, *static_batch_sizes]
+        )
+        grouping_config = config
+        if self._attention_mask is None or self._position_ids is None:
+            grouping_config = BatchConfig(
+                max_batch_size=config.max_batch_size,
+                max_total_batch_tokens=config.max_total_batch_tokens,
+                batching_window_ms=config.batching_window_ms,
+                max_padding_ratio=0.0,
+                prompt_length_buckets=config.prompt_length_buckets,
+            )
+
+        mode_indices: dict[bool, list[int]] = {}
+        for index, request in enumerate(requests):
+            mode_indices.setdefault(request.config.use_cache, []).append(index)
+
+        formed_batches: list[BatchRequest] = []
+        for mode_group in mode_indices.values():
+            groups = form_batch_indices(
+                [len(prompt_ids[index]) for index in mode_group],
+                grouping_config,
+                max_batch_size=effective_batch_size,
+            )
+            for group in groups:
+                original_indices = tuple(mode_group[index] for index in group)
+                batch_prompts = tuple(prompt_ids[index] for index in original_indices)
+                formed_batches.append(BatchRequest(
+                    requests=tuple(requests[index] for index in original_indices),
+                    prompt_token_ids=batch_prompts,
+                    bucket_index=config.bucket_index(len(batch_prompts[0])),
+                    request_indices=original_indices,
+                ))
+        formation_ms = (time.perf_counter() - formation_started) * 1000.0
+        results: list[GenerationResult | None] = [None] * len(requests)
+        metrics: list[BatchMetrics] = []
+        for batch in formed_batches:
+            batch_results, batch_metrics = self._generate_batch_request(
+                batch, formation_ms / max(len(formed_batches), 1)
+            )
+            metrics.append(batch_metrics)
+            for result_index, result in zip(batch.request_indices, batch_results):
+                results[result_index] = result
+        self.last_batch_metrics = tuple(metrics)
+        if any(result is None for result in results):
+            raise RuntimeError("batch generation did not produce a result for every request")
+        return [result for result in results if result is not None]
+
+    def _run_batch(
+        self,
+        feeds: dict[str, np.ndarray],
+    ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        names = [item.name for item in self.session.get_outputs()]
+        outputs = self.session.run(None, feeds)
+        output_map = dict(zip(names, outputs))
+        if self.model_metadata.logits_name not in output_map:
+            raise IncompatibleModelError(
+                f"ONNX model did not return logits output "
+                f"{self.model_metadata.logits_name!r}"
+            )
+        logits = np.asarray(output_map[self.model_metadata.logits_name])
+        present: dict[str, np.ndarray] = {}
+        for past_name, present_name in self.metadata.input_to_output:
+            if present_name not in output_map:
+                raise IncompatibleModelError(
+                    f"ONNX model did not return cache output {present_name!r}"
+                )
+            present[past_name] = np.asarray(output_map[present_name])
+        return logits, present
+
+    def _generate_batch_request(
+        self,
+        batch: BatchRequest,
+        formation_ms: float,
+    ) -> tuple[list[GenerationResult], BatchMetrics]:
+        requests = batch.requests
+        prompt_ids = batch.prompt_token_ids
+        batch_size = len(requests)
+        prompt_lengths = [len(ids) for ids in prompt_ids]
+        padded_length = max(prompt_lengths)
+        pad_token = next(
+            (
+                request.config.pad_token_id
+                for request in requests
+                if request.config.pad_token_id is not None
+            ),
+            getattr(self.tokenizer, "pad_token_id", None),
+        )
+        if pad_token is None:
+            pad_token = next(
+                (
+                    request.config.eos_token_id
+                    for request in requests
+                    if request.config.eos_token_id is not None
+                ),
+                getattr(self.tokenizer, "eos_token_id", 0),
+            )
+        if pad_token is None:
+            pad_token = 0
+
+        input_dtype = _numpy_dtype(self._inputs[self._input_ids].type)
+        padded_ids = np.full(
+            (batch_size, padded_length), int(pad_token), dtype=input_dtype
+        )
+        prompt_mask = np.zeros((batch_size, padded_length), dtype=np.int64)
+        prompt_positions = np.zeros((batch_size, padded_length), dtype=np.int64)
+        for row, tokens in enumerate(prompt_ids):
+            offset = padded_length - len(tokens)
+            padded_ids[row, offset:] = tokens
+            prompt_mask[row, offset:] = 1
+            prompt_positions[row, offset:] = np.arange(len(tokens), dtype=np.int64)
+
+        prefill_feeds = create_prefill_feed(
+            self.session, padded_ids, prompt_mask
+        )
+        if self._position_ids is not None:
+            position_dtype = _numpy_dtype(self._inputs[self._position_ids].type)
+            prefill_feeds[self._position_ids] = prompt_positions.astype(
+                position_dtype, copy=False
+            )
+
+        started = time.perf_counter()
+        logits, present = self._run_batch(prefill_feeds)
+        first_token_at = time.perf_counter()
+        decode_started = first_token_at
+        generated: list[list[int]] = [[] for _ in requests]
+        completion_times: list[float | None] = [None] * batch_size
+        active = list(range(batch_size))
+        use_cache = requests[0].config.use_cache
+        if not use_cache:
+            present = {}
+
+        for row, request in enumerate(requests):
+            if request.config.max_new_tokens == 0:
+                completion_times[row] = first_token_at
+
+        while active:
+            surviving: list[int] = []
+            surviving_rows: list[int] = []
+            for active_row, original_row in enumerate(active):
+                request = requests[original_row]
+                if request.config.max_new_tokens == 0:
+                    continue
+                token = int(np.argmax(logits[active_row, -1]))
+                generated[original_row].append(token)
+                eos = request.config.eos_token_id
+                if eos is None:
+                    eos = getattr(self.tokenizer, "eos_token_id", None)
+                is_complete = (
+                    (eos is not None and token == eos)
+                    or len(generated[original_row]) >= request.config.max_new_tokens
+                )
+                if is_complete:
+                    completion_times[original_row] = time.perf_counter()
+                else:
+                    surviving.append(original_row)
+                    surviving_rows.append(active_row)
+            if not surviving:
+                break
+
+            active = surviving
+            if use_cache:
+                present = {
+                    name: np.take(value, surviving_rows, axis=0)
+                    for name, value in present.items()
+                }
+                cache_feeds = {
+                    name: value for name, value in present.items()
+                }
+                decode_ids = np.asarray(
+                    [[generated[row][-1]] for row in active],
+                    dtype=input_dtype,
+                )
+                feeds: dict[str, np.ndarray] = {
+                    self._input_ids: decode_ids,
+                    **cache_feeds,
+                }
+                if self._attention_mask is not None:
+                    mask_dtype = _numpy_dtype(
+                        self._inputs[self._attention_mask].type
+                    )
+                    generated_width = len(generated[active[0]])
+                    current_mask = np.concatenate(
+                        [
+                            prompt_mask[active],
+                            np.ones((len(active), generated_width), dtype=np.int64),
+                        ],
+                        axis=1,
+                    )
+                    feeds[self._attention_mask] = current_mask.astype(
+                        mask_dtype, copy=False
+                    )
+                if self._position_ids is not None:
+                    position_dtype = _numpy_dtype(
+                        self._inputs[self._position_ids].type
+                    )
+                    positions = [
+                        prompt_lengths[row] + len(generated[row]) - 1
+                        for row in active
+                    ]
+                    feeds[self._position_ids] = np.asarray(
+                        positions, dtype=position_dtype
+                    ).reshape(len(active), 1)
+                if "use_cache_branch" in self._inputs:
+                    branch = self._inputs["use_cache_branch"]
+                    if branch.type != "tensor(bool)":
+                        raise IncompatibleModelError(
+                            "Expected boolean use_cache_branch input, "
+                            f"got {branch.type}"
+                        )
+                    feeds["use_cache_branch"] = np.asarray(
+                        True if len(branch.shape) == 0 else [True]
+                    )
+                logits, present = self._run_batch(feeds)
+            else:
+                current_lengths = [
+                    prompt_lengths[row] + len(generated[row]) for row in active
+                ]
+                current_width = max(current_lengths)
+                current_ids = np.full(
+                    (len(active), current_width), int(pad_token), dtype=input_dtype
+                )
+                current_mask = np.zeros(
+                    (len(active), current_width), dtype=np.int64
+                )
+                current_positions = np.zeros(
+                    (len(active), current_width), dtype=np.int64
+                )
+                for batch_row, original_row in enumerate(active):
+                    tokens = [*prompt_ids[original_row], *generated[original_row]]
+                    offset = current_width - len(tokens)
+                    current_ids[batch_row, offset:] = tokens
+                    current_mask[batch_row, offset:] = 1
+                    current_positions[batch_row, offset:] = np.arange(
+                        len(tokens), dtype=np.int64
+                    )
+                feeds = create_prefill_feed(
+                    self.session, current_ids, current_mask
+                )
+                if self._position_ids is not None:
+                    position_dtype = _numpy_dtype(
+                        self._inputs[self._position_ids].type
+                    )
+                    feeds[self._position_ids] = current_positions.astype(
+                        position_dtype, copy=False
+                    )
+                logits, _ = self._run_batch(feeds)
+
+        finished = time.perf_counter()
+        execution_ms = (finished - started) * 1000.0
+        generated_count = sum(map(len, generated))
+        real_prompt_tokens = sum(prompt_lengths)
+        padded_prompt_tokens = padded_length * batch_size
+        metrics = BatchMetrics(
+            effective_batch_size=batch_size,
+            prompt_tokens=real_prompt_tokens,
+            padded_prompt_tokens=padded_prompt_tokens,
+            padding_overhead_ratio=(
+                (padded_prompt_tokens - real_prompt_tokens)
+                / real_prompt_tokens
+            ),
+            batch_formation_time_ms=formation_ms,
+            execution_time_ms=execution_ms,
+            generated_tokens=generated_count,
+            aggregate_tokens_per_second=(
+                generated_count / (execution_ms / 1000.0)
+                if execution_ms > 0
+                else 0.0
+            ),
+        )
+
+        results: list[GenerationResult] = []
+        for row, request in enumerate(requests):
+            completed_at = completion_times[row]
+            if completed_at is None:
+                completed_at = finished
+            per_request_decode_s = max(0.0, completed_at - decode_started)
+            token_count = len(generated[row])
+            all_ids = [*prompt_ids[row], *generated[row]]
+            first_ms = (first_token_at - started) * 1000.0
+            decode_ms = per_request_decode_s * 1000.0
+            results.append(GenerationResult(
+                text=decode_model_tokens(
+                    self.tokenizer, all_ids, skip_special_tokens=True
+                ),
+                token_ids=tuple(all_ids),
+                prompt_token_ids=prompt_ids[row],
+                generated_token_ids=tuple(generated[row]),
+                cache_used=use_cache,
+                time_to_first_token_ms=first_ms,
+                decode_latency_ms=decode_ms,
+                inter_token_latency_ms=decode_ms / max(token_count, 1),
+                tokens_per_second=(
+                    token_count / per_request_decode_s
+                    if per_request_decode_s > 0
+                    else 0.0
+                ),
+                metadata=self.metadata,
+                request_id=request.request_id,
+                prompt_token_count=prompt_lengths[row],
+                generated_token_count=token_count,
+                prefill_latency_ms=first_ms,
+            ))
+        return results, metrics

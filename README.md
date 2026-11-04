@@ -48,9 +48,51 @@ print(result.text, result.tokens_per_second)
 ```
 
 `GenerationRequest` also accepts an optional `request_id`, `priority`, and
-`deadline_s` so future scheduling and batching layers can preserve request
-metadata. `generate_batch(...)` is intentionally a not-yet-implemented
-integration stub; dynamic batching belongs to the batching contributor.
+`deadline_s`. Batched generation preserves each request ID and supports
+independent EOS and generation limits:
+
+```python
+from models.batching import BatchConfig, DynamicBatcher
+
+batch_config = BatchConfig(
+    max_batch_size=8,
+    max_total_batch_tokens=8192,
+    max_padding_ratio=0.5,
+    prompt_length_buckets=(128, 512, 2048, 4096),
+)
+results = generator.generate_batch(requests, batch_config)
+print(generator.last_batch_metrics)
+```
+
+For an apples-to-apples load comparison, the benchmark helper reports request
+throughput, generated-token throughput, mean latency, and p95 latency for single,
+unbucketed, and bucketed execution at each requested concurrency:
+
+```python
+from models.batching import benchmark_batching
+
+measurements = await benchmark_batching(generator, workload, [1, 4, 8], batch_config)
+```
+
+`generate_batch` forms same-bucket groups immediately. For concurrent callers,
+`DynamicBatcher` collects requests during its configured window and resolves
+each submitter with its own result:
+
+```python
+batcher = DynamicBatcher(
+    lambda pending: generator.generate_batch(list(pending), batch_config),
+    token_counter=lambda request: generator.count_prompt_tokens(request.prompt),
+    config=batch_config,
+)
+# Submit requests with `await batcher.submit(request)`, then call `await batcher.close()`.
+```
+
+Set `prompt_length_buckets=None` to compare unbucketed batching with the default
+bucketed policy. `BatchMetrics` reports effective batch size, prompt and padded
+token counts, padding overhead, formation and execution time, and aggregate
+generated tokens per second. Each `GenerationResult` retains per-request
+latency and throughput measurements. `generate(request)` remains available for
+single-request execution.
 
 The directory must contain an `.onnx` file and tokenizer files such as
 `tokenizer.json`/`tokenizer_config.json` and `vocab.json` or a SentencePiece
