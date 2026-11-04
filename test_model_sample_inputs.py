@@ -1,9 +1,13 @@
 
 import numpy as np
 import pytest
+import onnxruntime as ort
 
 from models.loader import load_model
-from models.sample_inputs import load_sample_inputs
+from models.sample_inputs import (
+    generate_diagnostic_inputs,
+    load_sample_inputs,
+)
 
 
 @pytest.fixture
@@ -232,4 +236,95 @@ def test_dynamic_dimension_accepts_different_sizes(tmp_path):
     assert result["input"].shape == (4, 3)
 
 
+def test_generate_diagnostic_inputs_for_mobilenet():
+    session = ort.InferenceSession(
+        "models/mobilenet_v2.onnx",
+        providers=["CPUExecutionProvider"],
+    )
+
+    feed = generate_diagnostic_inputs(session.get_inputs())
+
+    assert set(feed) == {item.name for item in session.get_inputs()}
+    for item in session.get_inputs():
+        assert feed[item.name].shape == tuple(item.shape)
+        assert str(feed[item.name].dtype) == {
+            "tensor(float)": "float32",
+            "tensor(float16)": "float16",
+        }.get(item.type, str(feed[item.name].dtype))
+
+
+def test_generate_qwen_decoder_diagnostic_inputs():
+    from types import SimpleNamespace
+
+    inputs = [
+        SimpleNamespace(
+            name="input_ids",
+            shape=["batch_size", "sequence_length"],
+            type="tensor(int64)",
+        ),
+        SimpleNamespace(
+            name="attention_mask",
+            shape=[
+                "batch_size",
+                "past_sequence_length + sequence_length",
+            ],
+            type="tensor(int64)",
+        ),
+        SimpleNamespace(
+            name="position_ids",
+            shape=["batch_size", "sequence_length"],
+            type="tensor(int64)",
+        ),
+    ]
+    for layer in range(24):
+        for kind in ("key", "value"):
+            inputs.append(
+                SimpleNamespace(
+                    name=f"past_key_values.{layer}.{kind}",
+                    shape=["batch_size", 2, "past_sequence_length", 64],
+                    type="tensor(float16)",
+                )
+            )
+
+    feed = generate_diagnostic_inputs(inputs)
+
+    assert feed["input_ids"].shape == (1, 2)
+    assert feed["input_ids"].dtype == np.int64
+    assert np.all(feed["input_ids"] == 0)
+    assert feed["attention_mask"].shape == (1, 2)
+    assert np.array_equal(feed["attention_mask"], [[1, 1]])
+    assert feed["position_ids"].shape == (1, 2)
+    assert np.array_equal(feed["position_ids"], [[0, 1]])
+    assert feed["past_key_values.0.key"].shape == (1, 2, 0, 64)
+    assert feed["past_key_values.0.key"].dtype == np.float16
+    assert feed["past_key_values.23.value"].shape == (1, 2, 0, 64)
+    assert feed["past_key_values.23.value"].dtype == np.float16
+
+
+def test_generate_diagnostic_inputs_rejects_fixed_nonempty_cache():
+    from types import SimpleNamespace
+
+    inputs = [
+        SimpleNamespace(
+            name="input_ids",
+            shape=["batch_size", "sequence_length"],
+            type="tensor(int64)",
+        ),
+        SimpleNamespace(
+            name="attention_mask",
+            shape=[
+                "batch_size",
+                "past_sequence_length + sequence_length",
+            ],
+            type="tensor(int64)",
+        ),
+        SimpleNamespace(
+            name="past_key_values.0.key",
+            shape=["batch_size", 2, 8, 64],
+            type="tensor(float16)",
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="empty first-step KV cache"):
+        generate_diagnostic_inputs(inputs)
 

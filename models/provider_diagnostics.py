@@ -1,10 +1,100 @@
-
 import json
 import tempfile
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import onnxruntime as ort
+
+from models.sample_inputs import (
+    ONNX_TO_NUMPY_DTYPES,
+    generate_diagnostic_inputs,
+)
+
+
+def _summarize_outputs(
+    session: ort.InferenceSession,
+    values: list[np.ndarray],
+) -> list[dict[str, Any]]:
+    expected_outputs = session.get_outputs()
+    if len(values) != len(expected_outputs):
+        raise RuntimeError(
+            f"Inference returned {len(values)} outputs; "
+            f"the model declares {len(expected_outputs)}."
+        )
+    if not values:
+        raise RuntimeError("Inference returned no outputs.")
+
+    summaries = []
+    for metadata, value in zip(expected_outputs, values):
+        if not isinstance(value, np.ndarray):
+            raise RuntimeError(
+                f"Inference output {metadata.name!r} is not a NumPy tensor."
+            )
+
+        expected_shape = metadata.shape
+        if len(value.shape) != len(expected_shape):
+            raise RuntimeError(
+                f"Inference output {metadata.name!r} has rank {value.ndim}; "
+                f"the model declares rank {len(expected_shape)}."
+            )
+        for axis, (actual, expected) in enumerate(
+            zip(value.shape, expected_shape)
+        ):
+            if isinstance(expected, int) and expected > 0 and actual != expected:
+                raise RuntimeError(
+                    f"Inference output {metadata.name!r} dimension {axis} "
+                    f"is {actual}; the model declares {expected}."
+                )
+
+        expected_dtype = ONNX_TO_NUMPY_DTYPES.get(metadata.type)
+        if expected_dtype is not None and value.dtype != np.dtype(expected_dtype):
+            raise RuntimeError(
+                f"Inference output {metadata.name!r} has dtype {value.dtype}; "
+                f"the model declares {metadata.type}."
+            )
+
+        summaries.append({
+            "name": metadata.name,
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+        })
+
+    return summaries
+
+
+def _read_node_provider_counts(profile_path: str) -> dict[str, int]:
+    events = json.loads(Path(profile_path).read_text())
+    counts: dict[str, int] = {}
+    for event in events:
+        if event.get("cat") != "Node":
+            continue
+        provider = event.get("args", {}).get("provider")
+        if not provider:
+            continue
+        counts[provider] = counts.get(provider, 0) + 1
+    return counts
+
+
+def _execution_status(
+    requested_provider: str,
+    observed_node_providers: dict[str, int],
+    inference_succeeded: bool,
+) -> tuple[str, bool | None]:
+    if not inference_succeeded:
+        return "inference_failed", None
+    if not observed_node_providers:
+        return "no_nodes_observed", None
+
+    fallback = any(
+        provider != requested_provider
+        for provider in observed_node_providers
+    )
+    if requested_provider not in observed_node_providers:
+        return "fallback", True
+    if fallback:
+        return "partial_fallback", True
+    return "full", False
 
 
 def diagnose_execution_providers(
@@ -29,8 +119,15 @@ def diagnose_execution_providers(
             "session_created": False,
             "session_providers": [],
             "observed_node_providers": {},
+            "actual_node_providers": [],
+            "provider_execution_status": "session_creation_failed",
+            "provider_fallback": None,
             "inference_succeeded": False,
+            "input_shapes": {},
+            "input_dtypes": {},
+            "outputs": [],
             "error": None,
+            "profiling_error": None,
         }
 
         try:
@@ -46,69 +143,53 @@ def diagnose_execution_providers(
                     sess_options=options,
                     providers=[provider],
                 )
-
                 result["session_created"] = True
                 result["session_providers"] = session.get_providers()
 
-                import numpy as np
-
-                feed = {}
-                for item in session.get_inputs():
-                    shape = [
-                        dim if isinstance(dim, int) and dim > 0 else 1
-                        for dim in item.shape
-                    ]
-
-                    dtype_map = {
-                        "tensor(float)": np.float32,
-                        "tensor(double)": np.float64,
-                        "tensor(float16)": np.float16,
-                        "tensor(int8)": np.int8,
-                        "tensor(int16)": np.int16,
-                        "tensor(int32)": np.int32,
-                        "tensor(int64)": np.int64,
-                        "tensor(uint8)": np.uint8,
-                        "tensor(uint16)": np.uint16,
-                        "tensor(uint32)": np.uint32,
-                        "tensor(uint64)": np.uint64,
-                        "tensor(bool)": np.bool_,
+                try:
+                    feed = generate_diagnostic_inputs(session.get_inputs())
+                    result["input_shapes"] = {
+                        name: list(value.shape)
+                        for name, value in feed.items()
+                    }
+                    result["input_dtypes"] = {
+                        name: str(value.dtype)
+                        for name, value in feed.items()
                     }
 
-                    dtype = dtype_map.get(item.type)
-                    if dtype is None:
-                        raise ValueError(
-                            f"Unsupported diagnostic input type "
-                            f"{item.type!r} for {item.name!r}"
-                        )
+                    output_values = session.run(None, feed)
+                    result["outputs"] = _summarize_outputs(
+                        session,
+                        output_values,
+                    )
+                    result["inference_succeeded"] = True
+                except Exception as exc:
+                    result["error"] = f"{type(exc).__name__}: {exc}"
 
-                    feed[item.name] = np.zeros(shape, dtype=dtype)
+                try:
+                    profile_path = session.end_profiling()
+                    result["observed_node_providers"] = (
+                        _read_node_provider_counts(profile_path)
+                    )
+                    result["actual_node_providers"] = list(
+                        result["observed_node_providers"]
+                    )
+                except Exception as exc:
+                    result["profiling_error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
 
-                session.run(None, feed)
-                result["inference_succeeded"] = True
-
-                profile_path = session.end_profiling()
-                events = json.loads(
-                    Path(profile_path).read_text()
+                (
+                    result["provider_execution_status"],
+                    result["provider_fallback"],
+                ) = _execution_status(
+                    provider,
+                    result["observed_node_providers"],
+                    result["inference_succeeded"],
                 )
 
-                counts = {}
-                for event in events:
-                    if event.get("cat") != "Node":
-                        continue
-
-                    executed_by = event.get("args", {}).get(
-                        "provider", "Unknown"
-                    )
-                    counts[executed_by] = (
-                        counts.get(executed_by, 0) + 1
-                    )
-
-                result["observed_node_providers"] = counts
-
         except Exception as exc:
-            result["error"] = (
-                f"{type(exc).__name__}: {exc}"
-            )
+            result["error"] = f"{type(exc).__name__}: {exc}"
 
         results.append(result)
 
@@ -117,8 +198,9 @@ def diagnose_execution_providers(
         "available_providers": ort.get_available_providers(),
         "results": results,
         "note": (
-            "Session creation does not prove full model compatibility. "
-            "Observed node providers describe this diagnostic inference "
-            "only; they are not a guarantee for every input or workload."
+            "Diagnostics use synthetic first-step inputs. Dynamic KV caches "
+            "start empty and the attention mask covers past plus current "
+            "tokens. Node provider assignments describe this inference only; "
+            "a session may use provider fallback."
         ),
     }

@@ -227,19 +227,46 @@ with st.expander("Model Inspection & Diagnostics", expanded=False):
                             "Inference Succeeded": "Yes" if r.get("inference_succeeded") else "No",
                             "Session Providers": sess_provs,
                             "Observed Node Providers": observed,
+                            "Execution Status": r.get(
+                                "provider_execution_status",
+                                "Unknown",
+                            ),
+                            "Provider Fallback": (
+                                "Yes"
+                                if r.get("provider_fallback") is True
+                                else "No"
+                                if r.get("provider_fallback") is False
+                                else "Unknown"
+                            ),
+                            "Outputs Returned": len(r.get("outputs", [])),
                             "Error": r.get("error") or "None",
                         })
                     st.dataframe(diag_rows, use_container_width=True, hide_index=True)
+                    for r in diag_results:
+                        outputs = r.get("outputs", [])
+                        if outputs:
+                            with st.expander(
+                                f"{r.get('provider', 'Provider')} output signatures",
+                                expanded=False,
+                            ):
+                                st.dataframe(
+                                    [
+                                        {
+                                            "Output": item.get("name", ""),
+                                            "Shape": str(item.get("shape", [])),
+                                            "Data Type": item.get("dtype", ""),
+                                        }
+                                        for item in outputs
+                                    ],
+                                    use_container_width=True,
+                                    hide_index=True,
+                                )
                 else:
                     st.caption("No diagnostic results available.")
 
                 note = diag.get("note", "")
                 if note:
-                    st.info(
-                        f"**Diagnostic Note**:\n\n{note}\n\n"
-                        f"*Zero-valued sample inputs were used for this diagnostic test inference. "
-                        f"Observed provider assignments apply only to this test run.*"
-                    )
+                    st.info(f"**Diagnostic Note**:\n\n{note}")
 
 # Mode Selector
 workflow_mode = st.radio(
