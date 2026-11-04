@@ -1,5 +1,6 @@
 """Streamlit dashboard for InferBench AutoTune."""
 
+import asyncio
 import json
 from pathlib import Path
 import time
@@ -15,6 +16,12 @@ from inferbench.dashboard.api_client import (
     format_throughput_change,
 )
 from models.inspection import inspect_model_configuration
+from models.generation import (
+    GenerationConfig,
+    GenerationRequest,
+    OnnxTextGenerator,
+)
+from models.batching import BatchConfig, DynamicBatcher
 from models.provider_diagnostics import diagnose_execution_providers
 
 # Page configuration
@@ -237,9 +244,12 @@ with st.expander("Model Inspection & Diagnostics", expanded=False):
 # Mode Selector
 workflow_mode = st.radio(
     "Workflow Mode",
-    ["AutoTune Optimization", "Single Benchmark"],
+    ["LLM Generation", "LLM Batching", "AutoTune Optimization", "Single Benchmark"],
     horizontal=True,
-    help="Choose whether to run automated multi-candidate tuning or evaluate a single manual configuration",
+    help=(
+        "Choose local LLM generation, automated multi-candidate tuning, "
+        "or a single manual benchmark"
+    ),
 )
 
 def fmt_ms(val):
@@ -250,9 +260,309 @@ def fmt_float(val, unit=""):
 
 
 # =========================================================================
-# Mode 1: AutoTune Optimization
+# Mode 0: LLM Generation
 # =========================================================================
-if workflow_mode == "AutoTune Optimization":
+if workflow_mode == "LLM Generation":
+    st.subheader("2. LLM Generation")
+    st.info(
+        "Run deterministic greedy generation directly against a local decoder-only "
+        "ONNX model and tokenizer. Cached decoding reuses the model's KV-cache "
+        "when the export exposes compatible past and present tensors."
+    )
+
+    prompt = st.text_area(
+        "Prompt",
+        value="Explain KV cache in one sentence.",
+        height=120,
+        help="Text passed to the local tokenizer before the ONNX prefill pass.",
+    )
+    gen_col1, gen_col2, gen_col3 = st.columns(3)
+    with gen_col1:
+        max_new_tokens = st.number_input(
+            "Maximum New Tokens",
+            min_value=0,
+            value=32,
+            step=1,
+        )
+    with gen_col2:
+        use_cache = st.checkbox(
+            "Use KV cache",
+            value=True,
+            help="Disable this only for exports without compatible cache tensors.",
+        )
+    with gen_col3:
+        generation_seed = st.number_input(
+            "Seed",
+            min_value=0,
+            value=0,
+            step=1,
+        )
+
+    generate_btn = st.button(
+        "Generate Text",
+        type="primary",
+        use_container_width=True,
+    )
+
+    if generate_btn:
+        cleaned_model_path = model_path.strip() if model_path else ""
+        if not cleaned_model_path:
+            st.error("Select an ONNX model before generating text.")
+        elif not prompt.strip():
+            st.error("Enter a non-empty prompt before generating text.")
+        else:
+            with st.spinner("Loading tokenizer and running ONNX generation..."):
+                try:
+                    generator = OnnxTextGenerator(
+                        Path(cleaned_model_path).parent,
+                        model_path=cleaned_model_path,
+                    )
+                    result = generator.generate(
+                        GenerationRequest(
+                            prompt=prompt,
+                            config=GenerationConfig(
+                                max_new_tokens=int(max_new_tokens),
+                                use_cache=use_cache,
+                                seed=int(generation_seed),
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    st.error(f"Generation failed: {type(exc).__name__}: {exc}")
+                else:
+                    st.markdown("### Generated Text")
+                    st.write(result.text)
+
+                    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+                    with metric_col1:
+                        st.metric("Prompt Tokens", result.prompt_token_count)
+                    with metric_col2:
+                        st.metric("Generated Tokens", result.generated_token_count)
+                    with metric_col3:
+                        st.metric("TTFT", fmt_ms(result.time_to_first_token_ms))
+                    with metric_col4:
+                        st.metric(
+                            "Token Throughput",
+                            fmt_float(result.tokens_per_second, "tokens/s"),
+                        )
+
+                    with st.expander("Generation Details"):
+                        detail_col1, detail_col2, detail_col3 = st.columns(3)
+                        with detail_col1:
+                            st.write(f"**KV cache used:** `{result.cache_used}`")
+                            st.write(f"**Prefill latency:** {fmt_ms(result.prefill_latency_ms)}")
+                        with detail_col2:
+                            st.write(f"**Decode latency:** {fmt_ms(result.decode_latency_ms)}")
+                            st.write(
+                                f"**Inter-token latency:** "
+                                f"{fmt_ms(result.inter_token_latency_ms)}"
+                            )
+                        with detail_col3:
+                            st.write(f"**Model family:** `{generator.model_metadata.model_family or 'N/A'}`")
+                            st.write(
+                                f"**Cache layers:** "
+                                f"`{generator.model_metadata.cache.layer_count}`"
+                            )
+
+
+# =========================================================================
+# Mode 1: LLM Batching
+# =========================================================================
+elif workflow_mode == "LLM Batching":
+    st.subheader("2. Dynamic LLM Batching")
+    st.info(
+        "Submit multiple prompts together. Requests are grouped by prompt-length "
+        "bucket, padded only within each group, and returned in the original order."
+    )
+
+    batch_prompts = st.text_area(
+        "Prompts (one per line)",
+        value=(
+            "Explain KV cache in one sentence.\n"
+            "What is dynamic batching?\n"
+            "Why are prompt-length buckets useful?"
+        ),
+        height=150,
+        help="Each non-empty line becomes one generation request.",
+    )
+    batch_col1, batch_col2, batch_col3 = st.columns(3)
+    with batch_col1:
+        batch_max_size = st.number_input(
+            "Maximum Batch Size", min_value=1, value=4, step=1
+        )
+        batch_total_tokens = st.number_input(
+            "Maximum Total Batch Tokens", min_value=1, value=8192, step=1
+        )
+    with batch_col2:
+        batch_window_ms = st.number_input(
+            "Batching Window (ms)", min_value=0.0, value=5.0, step=1.0
+        )
+        batch_padding_ratio = st.number_input(
+            "Maximum Padding Ratio",
+            min_value=0.0,
+            value=0.5,
+            step=0.1,
+            format="%.2f",
+        )
+    with batch_col3:
+        batch_bucket_text = st.text_input(
+            "Prompt Bucket Boundaries",
+            value="128,512,2048,4096",
+            help="Comma-separated maximum token lengths; leave blank to disable buckets.",
+        )
+        batch_max_new_tokens = st.number_input(
+            "Maximum New Tokens", min_value=0, value=32, step=1
+        )
+
+    batch_cache = st.checkbox("Use KV cache", value=True, key="batch_use_cache")
+    batch_btn = st.button(
+        "Run Batched Generation",
+        type="primary",
+        use_container_width=True,
+    )
+
+    if batch_btn:
+        cleaned_model_path = model_path.strip() if model_path else ""
+        prompts = [line.strip() for line in batch_prompts.splitlines() if line.strip()]
+        if not cleaned_model_path:
+            st.error("Select an ONNX model before running batched generation.")
+        elif not prompts:
+            st.error("Enter at least one prompt.")
+        else:
+            try:
+                boundaries = (
+                    tuple(
+                        int(value.strip())
+                        for value in batch_bucket_text.split(",")
+                        if value.strip()
+                    )
+                    if batch_bucket_text.strip()
+                    else None
+                )
+                batch_config = BatchConfig(
+                    max_batch_size=int(batch_max_size),
+                    max_total_batch_tokens=int(batch_total_tokens),
+                    batching_window_ms=float(batch_window_ms),
+                    max_padding_ratio=float(batch_padding_ratio),
+                    prompt_length_buckets=boundaries,
+                )
+            except (TypeError, ValueError) as exc:
+                st.error(f"Invalid batching configuration: {exc}")
+            else:
+                with st.spinner("Loading model and executing dynamic batches..."):
+                    try:
+                        generator = OnnxTextGenerator(
+                            Path(cleaned_model_path).parent,
+                            model_path=cleaned_model_path,
+                        )
+                        requests = [
+                            GenerationRequest(
+                                prompt=prompt,
+                                config=GenerationConfig(
+                                    max_new_tokens=int(batch_max_new_tokens),
+                                    use_cache=batch_cache,
+                                ),
+                                request_id=f"request-{index + 1}",
+                            )
+                            for index, prompt in enumerate(prompts)
+                        ]
+                        batcher = DynamicBatcher(
+                            lambda pending: generator.generate_batch(
+                                list(pending), batch_config
+                            ),
+                            token_counter=lambda request: generator.count_prompt_tokens(
+                                request.prompt
+                            ),
+                            config=batch_config,
+                        )
+
+                        async def submit_all():
+                            try:
+                                return await asyncio.gather(
+                                    *(batcher.submit(request) for request in requests)
+                                )
+                            finally:
+                                await batcher.close()
+
+                        results = asyncio.run(submit_all())
+                        metrics = batcher.last_batch_metrics
+                    except Exception as exc:
+                        st.error(
+                            f"Batched generation failed: {type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        st.success(
+                            f"Completed {len(results)} requests in "
+                            f"{len(metrics)} formed batch(es)."
+                        )
+                        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+                        with metric_col1:
+                            st.metric(
+                                "Effective Batch Size",
+                                f"{sum(m.effective_batch_size for m in metrics) / len(metrics):.1f}"
+                                if metrics else "N/A",
+                            )
+                        with metric_col2:
+                            st.metric(
+                                "Padding Overhead",
+                                f"{sum(m.padding_overhead_ratio for m in metrics) / len(metrics) * 100:.1f}%"
+                                if metrics else "N/A",
+                            )
+                        with metric_col3:
+                            st.metric(
+                                "Generated Tokens",
+                                sum(result.generated_token_count for result in results),
+                            )
+                        with metric_col4:
+                            st.metric(
+                                "Aggregate Throughput",
+                                fmt_float(
+                                    sum(m.aggregate_tokens_per_second for m in metrics)
+                                    if metrics else None,
+                                    "tokens/s",
+                                ),
+                            )
+
+                        st.markdown("### Results")
+                        st.dataframe(
+                            [
+                                {
+                                    "Request": result.request_id or index + 1,
+                                    "Prompt Tokens": result.prompt_token_count,
+                                    "Generated Tokens": result.generated_token_count,
+                                    "TTFT": fmt_ms(result.time_to_first_token_ms),
+                                    "Output": result.text,
+                                }
+                                for index, result in enumerate(results)
+                            ],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                        st.markdown("### Formed Batch Metrics")
+                        st.dataframe(
+                            [
+                                {
+                                    "Batch Size": metric.effective_batch_size,
+                                    "Prompt Tokens": metric.prompt_tokens,
+                                    "Padded Tokens": metric.padded_prompt_tokens,
+                                    "Padding Overhead": f"{metric.padding_overhead_ratio * 100:.1f}%",
+                                    "Formation": fmt_ms(metric.batch_formation_time_ms),
+                                    "Execution": fmt_ms(metric.execution_time_ms),
+                                    "Throughput": fmt_float(
+                                        metric.aggregate_tokens_per_second,
+                                        "tokens/s",
+                                    ),
+                                }
+                                for metric in metrics
+                            ],
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+
+# Mode 2: AutoTune Optimization
+# =========================================================================
+elif workflow_mode == "AutoTune Optimization":
     st.subheader("2. AutoTune Configuration")
     st.info(
         "AutoTune systematically evaluates candidate graph optimization levels "

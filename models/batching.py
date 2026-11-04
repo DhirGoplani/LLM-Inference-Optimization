@@ -224,6 +224,7 @@ class DynamicBatcher:
             await self._worker
 
     async def _run(self) -> None:
+        self.last_batch_metrics = ()
         stop_after_batch = False
         while not stop_after_batch:
             first = await self._queue.get()
@@ -319,7 +320,7 @@ class DynamicBatcher:
             for result, (_, _, _, future) in zip(results, group_items):
                 if not future.done():
                     future.set_result(result)
-        self.last_batch_metrics = tuple(metrics)
+        self.last_batch_metrics += tuple(metrics)
 
 
 async def benchmark_batching(
