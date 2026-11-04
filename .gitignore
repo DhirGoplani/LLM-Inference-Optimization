@@ -20,4 +20,5 @@ Thumbs.db
 *.onnx
 *.onnx.data
 
-calibration/
+# ONNX external tensor data
+*.onnx_data

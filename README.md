@@ -31,6 +31,48 @@ python scripts/makemodel.py
 
 Tests that need the model are skipped if it is missing.
 
+## Local ONNX LLM generation
+
+`models.generation.OnnxTextGenerator` loads an ONNX decoder and a local
+Hugging Face tokenizer, then performs deterministic greedy generation:
+
+```python
+from models.generation import GenerationConfig, GenerationRequest, OnnxTextGenerator
+
+generator = OnnxTextGenerator("models/qwen2.5-0.5b")
+result = generator.generate(GenerationRequest(
+    "Explain KV cache in one sentence.",
+    GenerationConfig(max_new_tokens=32),
+))
+print(result.text, result.tokens_per_second)
+```
+
+`GenerationRequest` also accepts an optional `request_id`, `priority`, and
+`deadline_s` so future scheduling and batching layers can preserve request
+metadata. `generate_batch(...)` is intentionally a not-yet-implemented
+integration stub; dynamic batching belongs to the batching contributor.
+
+The directory must contain an `.onnx` file and tokenizer files such as
+`tokenizer.json`/`tokenizer_config.json` and `vocab.json` or a SentencePiece
+model. Cached generation requires the export to expose matching past-cache
+inputs and present-cache outputs; use `GenerationConfig(use_cache=False)` for
+an uncached export.
+
+### Optional Hugging Face parity check
+
+After downloading the original Qwen weights (about 1 GB), compare the first
+20 greedy tokens for three fixed prompts:
+
+```bash
+python scripts/validate_qwen_generation.py
+```
+
+The pytest version is opt-in because it downloads/loads a large model:
+
+```bash
+RUN_QWEN_PARITY=1 python -m pytest -q tests/test_qwen_generation_parity.py
+```
+
 ## Benchmark engine (Member 2)
 
 ```python

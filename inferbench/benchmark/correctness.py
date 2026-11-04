@@ -3,6 +3,28 @@
 import numpy as np
 
 
+def compare_generated_tokens(cached, uncached):
+    """Compare greedy token sequences produced with and without KV-cache."""
+    cached_ids = tuple(cached.generated_token_ids if hasattr(cached, "generated_token_ids") else cached)
+    uncached_ids = tuple(uncached.generated_token_ids if hasattr(uncached, "generated_token_ids") else uncached)
+    return {
+        "passed": cached_ids == uncached_ids,
+        "cached_tokens": cached_ids,
+        "uncached_tokens": uncached_ids,
+        "error": None if cached_ids == uncached_ids else "Generated token sequences differ",
+    }
+
+
+def validate_generation_request(prompt, max_new_tokens):
+    """Validate prompt and generation length before creating an ORT session run."""
+    if not isinstance(prompt, str):
+        raise TypeError("prompt must be a string")
+    if not prompt.strip():
+        raise ValueError("prompt must not be empty")
+    if max_new_tokens < 0:
+        raise ValueError("max_new_tokens must be non-negative")
+
+
 def compare_outputs(baseline, optimized, rtol=1e-3, atol=1e-5):
     """Compare two lists of output arrays.
 
