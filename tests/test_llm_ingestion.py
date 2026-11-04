@@ -669,6 +669,47 @@ def test_tokenizer_encode_prompt_output_structure_validation():
     with pytest.raises(ValueError, match="attention_mask values must be binary"):
         encode_prompt(mock_tok, "valid prompt")
 
+    # 8. Floating-point attention mask rejected
+    mock_tok.return_value = {
+        "input_ids": np.array([[10, 20]]),
+        "attention_mask": np.array([[1.0, 0.0]]),
+    }
+    with pytest.raises(TypeError, match="unsupported attention_mask dtype"):
+        encode_prompt(mock_tok, "valid prompt")
+
+    # 9. Complex attention mask rejected
+    mock_tok.return_value = {
+        "input_ids": np.array([[10, 20]]),
+        "attention_mask": np.array([[1+0j, 0+0j]]),
+    }
+    with pytest.raises(TypeError, match="unsupported attention_mask dtype"):
+        encode_prompt(mock_tok, "valid prompt")
+
+    # 10. String attention mask rejected
+    mock_tok.return_value = {
+        "input_ids": np.array([[10, 20]]),
+        "attention_mask": np.array([["1", "0"]]),
+    }
+    with pytest.raises(TypeError, match="unsupported attention_mask dtype"):
+        encode_prompt(mock_tok, "valid prompt")
+
+    # 11. Object attention mask rejected
+    mock_tok.return_value = {
+        "input_ids": np.array([[10, 20]]),
+        "attention_mask": np.array([[1, 0]], dtype=object),
+    }
+    with pytest.raises(TypeError, match="unsupported attention_mask dtype"):
+        encode_prompt(mock_tok, "valid prompt")
+
+    # 12. Boolean attention mask accepted and converted to int64 binary
+    mock_tok.return_value = {
+        "input_ids": np.array([[10, 20]]),
+        "attention_mask": np.array([[True, False]]),
+    }
+    res = encode_prompt(mock_tok, "valid prompt")
+    assert res["attention_mask"].dtype == np.int64
+    assert np.array_equal(res["attention_mask"], np.array([[1, 0]]))
+
 
 def test_tokenizer_decode_tokens_validation():
     """Verify decode_tokens rejects None, invalid types, floats, and negative token IDs."""
@@ -774,17 +815,23 @@ def test_qwen2_5_live_prefill_smoke():
     feed = create_prefill_feed(session, encoded["input_ids"], encoded["attention_mask"])
 
     outputs = session.run(None, feed)
-    output_dict = dict(zip([o.name for o in session.get_outputs()], outputs))
+    output_metas = session.get_outputs()
+    assert len(outputs) == len(output_metas)
+    output_dict = dict(zip([o.name for o in output_metas], outputs))
 
+    assert "logits" in output_dict
     logits = output_dict["logits"]
+    assert logits.dtype == np.float16
     assert np.isfinite(logits).all()
     assert logits.shape == (1, encoded["input_ids"].shape[1], 151936)
 
-    # Verify all 48 KV-cache outputs exist, are finite float16, and match shape (1, 2, seq_len, 64)
-    kv_outputs = [k for k in output_dict if k.startswith("present.") or "present" in k]
-    assert len(kv_outputs) == 48
-    for kv in kv_outputs:
-        arr = output_dict[kv]
+    # Verify that every output other than logits is a recognized KV-cache output
+    from scripts.validate_qwen_onnx import is_kv_cache_output
+    non_logits = [k for k in output_dict if k != "logits"]
+    assert len(non_logits) == 48
+    for k in non_logits:
+        assert is_kv_cache_output(k)
+        arr = output_dict[k]
         assert arr.dtype == np.float16
         assert np.isfinite(arr).all()
         assert arr.shape == (1, 2, encoded["input_ids"].shape[1], 64)

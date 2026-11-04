@@ -95,7 +95,7 @@ def encode_prompt(
     if arr_mask.size == 0:
         raise ValueError("Tokenizer produced empty attention_mask array")
 
-    # Reject floating-point and boolean input IDs rather than silently coercing them
+    # Reject non-integer token IDs rather than silently coercing them
     if np.issubdtype(arr_ids.dtype, np.floating) or arr_ids.dtype == np.bool_:
         raise TypeError(
             f"Tokenizer returned invalid input_ids dtype {arr_ids.dtype}. Expected integer token IDs."
@@ -105,9 +105,11 @@ def encode_prompt(
             f"Tokenizer returned non-integer input_ids dtype {arr_ids.dtype}. Expected integer token IDs."
         )
 
-    if np.issubdtype(arr_mask.dtype, np.floating):
+    # Validate attention_mask: accept only integer or boolean dtypes; reject float, complex, string, object, etc.
+    if not (np.issubdtype(arr_mask.dtype, np.integer) or arr_mask.dtype == np.bool_):
         raise TypeError(
-            f"Tokenizer returned floating-point attention_mask dtype {arr_mask.dtype}. Expected integer or boolean."
+            f"Tokenizer returned unsupported attention_mask dtype '{arr_mask.dtype}'. "
+            f"Expected integer or boolean dtype."
         )
 
     input_ids = np.ascontiguousarray(arr_ids, dtype=np.int64)

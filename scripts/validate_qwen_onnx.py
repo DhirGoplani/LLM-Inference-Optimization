@@ -182,7 +182,15 @@ def validate_qwen_onnx(model_dir: str = "models/qwen2.5_0.5b") -> bool:
                 f"Output '{out_meta.name}' rank mismatch: got {arr.ndim}, expected {len(out_meta.shape)}"
             )
 
+        # Explicitly assert logits output exists
+        assert "logits" in output_dict, "Expected 'logits' tensor in model outputs"
         logits = output_dict["logits"]
+
+        # Explicitly validate that logits dtype is np.float16
+        assert logits.dtype == np.float16, (
+            f"Logits dtype mismatch: expected float16, got {logits.dtype}"
+        )
+
         batch_size = input_ids.shape[0]
         prompt_len = input_ids.shape[1]
         vocab_size = meta.get("vocab_size")
@@ -198,7 +206,14 @@ def validate_qwen_onnx(model_dir: str = "models/qwen2.5_0.5b") -> bool:
         print(f"  Logits Shape:         {logits.shape} (dtype: {logits.dtype})")
         print(f"  Logits All Finite:    {np.isfinite(logits).all()}")
 
-        # Validate all 48 KV-cache outputs: finite, float16 dtype, and expected shape (1, 2, prompt_len, 64)
+        # Verify that every output other than logits is recognized as a KV-cache output
+        non_logits_outputs = [name for name in output_dict if name != "logits"]
+        for out_name in non_logits_outputs:
+            assert is_kv_cache_output(out_name), (
+                f"Output '{out_name}' is not recognized as a valid KV-cache output tensor"
+            )
+
+        # Validate all 48 KV-cache outputs: finite, float16 dtype, and expected shape (batch_size, 2, prompt_len, 64)
         kv_outputs = [name for name in output_dict if is_kv_cache_output(name)]
         assert len(kv_outputs) == 48, f"Expected 48 KV-cache outputs, got {len(kv_outputs)}"
 
@@ -213,7 +228,7 @@ def validate_qwen_onnx(model_dir: str = "models/qwen2.5_0.5b") -> bool:
             )
 
         print(f"  KV Outputs Count:     {len(kv_outputs)}")
-        print(f"  All {len(kv_outputs)} KV-cache outputs are finite float16 tensors conforming to (1, 2, {prompt_len}, 64).")
+        print(f"  All {len(kv_outputs)} KV-cache outputs are finite float16 tensors conforming to ({batch_size}, 2, {prompt_len}, 64).")
 
         # Next-token prediction
         next_token_id = int(np.argmax(logits[0, -1, :]))
