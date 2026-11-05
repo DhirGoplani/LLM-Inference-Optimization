@@ -35,6 +35,22 @@ def test_overload_is_rejected_explicitly_and_nothing_hangs():
     assert out["outcome_counts"] == {"completed": 3, "rejected:queue_full": 9}
     assert out["metrics"]["counts"]["rejected_by_reason"] == {"queue_full": 9}
     assert sum(out["outcome_counts"].values()) == 12
+    assert len(out["request_outcomes"]) == 12
+    assert sum(item["outcome"] == "completed" for item in out["request_outcomes"]) == 3
+    assert sum(item["outcome"] == "rejected:queue_full" for item in out["request_outcomes"]) == 9
+
+
+def test_scheduler_report_records_a_cancelled_request():
+    scenario = build_scenario("concurrent", max_new_tokens=2, num_requests=3)
+    out = run(run_scheduler_scenario(
+        FakeGenerator(cached_s=0.01),
+        scenario,
+        BatchConfig(max_batch_size=1, batching_window_ms=0.0),
+        cancel_request_id="concurrent-000",
+    ))
+    outcomes = {item["request_id"]: item["outcome"] for item in out["request_outcomes"]}
+    assert outcomes["concurrent-000"] == "cancelled"
+    assert out["outcome_counts"]["cancelled"] == 1
 
 
 def test_high_priority_requests_finish_first_in_a_burst():

@@ -33,9 +33,12 @@ streamlit run inferbench/dashboard/app.py
 
 The dashboard provides model inspection and execution-provider diagnostics,
 local greedy LLM generation with an optional KV cache, and the existing
-AutoTune/single-benchmark workflows. Select an ONNX file from `models/` and
-use **LLM Generation** to run a local tokenizer and ONNX decoder; the model
-directory must contain the tokenizer files required by the selected export.
+AutoTune/single-benchmark workflows. **Request Scheduling** runs selectable
+workloads through the serving scheduler and displays per-request outcomes,
+completion order, queue/latency/throughput metrics, and downloadable JSON
+results. Select an ONNX file from `models/` and use **LLM Generation** to run a
+local tokenizer and ONNX decoder; the model directory must contain the tokenizer
+files required by the selected export.
 
 The MobileNet test model is not stored in git. To create it (needs the heavy `modelgen` extras):
 

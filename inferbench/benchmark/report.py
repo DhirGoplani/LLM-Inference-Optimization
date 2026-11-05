@@ -406,6 +406,8 @@ async def run_scheduler_scenario(
     batch_config: BatchConfig | None = None,
     scheduler_overrides: dict[str, Any] | None = None,
     overall_timeout_s: float = 600.0,
+    cancel_request_id: str | None = None,
+    cancel_after_s: float = 0.0,
 ) -> dict[str, Any]:
     """Send a whole scenario to the scheduler as one burst and report what happened.
 
@@ -439,12 +441,21 @@ async def run_scheduler_scenario(
                 handles[request.request_id] = scheduler.enqueue(request)
             except RequestRejectedError as exc:
                 outcomes[request.request_id] = f"rejected:{exc.reason}"
+        cancellation = None
+        if cancel_request_id is not None:
+            async def cancel_later() -> None:
+                await asyncio.sleep(max(0.0, cancel_after_s))
+                scheduler.cancel(cancel_request_id)
+
+            cancellation = asyncio.create_task(cancel_later())
         for rid, handle in handles.items():
             try:
                 await handle.result()
                 outcomes[rid] = "completed"
             except Exception as exc:
                 outcomes[rid] = handle.state.value if handle.state.terminal else _error(exc)
+        if cancellation is not None:
+            await cancellation
         await scheduler.close()
 
     hung = False
@@ -474,6 +485,14 @@ async def run_scheduler_scenario(
         "scenario": scenario.name,
         "description": scenario.description,
         "requests": len(requests),
+        "request_outcomes": [
+            {
+                "request_id": request.request_id,
+                "priority": request.priority,
+                "outcome": outcomes.get(request.request_id, "not_completed"),
+            }
+            for request in requests
+        ],
         "scheduler_config": asdict(config),
         "outcome_counts": counts,
         "rejected": sum(v for k, v in counts.items() if k.startswith("rejected")),

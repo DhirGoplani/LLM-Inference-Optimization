@@ -15,6 +15,8 @@ from inferbench.dashboard.api_client import (
     format_latency_speedup,
     format_throughput_change,
 )
+from inferbench.benchmark.report import run_scheduler_scenario
+from inferbench.benchmark.scenarios import SCENARIO_NAMES, build_scenario
 from models.inspection import inspect_model_configuration
 from models.generation import (
     GenerationConfig,
@@ -271,7 +273,13 @@ with st.expander("Model Inspection & Diagnostics", expanded=False):
 # Mode Selector
 workflow_mode = st.radio(
     "Workflow Mode",
-    ["LLM Generation", "LLM Batching", "AutoTune Optimization", "Single Benchmark"],
+    [
+        "LLM Generation",
+        "LLM Batching",
+        "Request Scheduling",
+        "AutoTune Optimization",
+        "Single Benchmark",
+    ],
     horizontal=True,
     help=(
         "Choose local LLM generation, automated multi-candidate tuning, "
@@ -585,6 +593,268 @@ elif workflow_mode == "LLM Batching":
                             use_container_width=True,
                             hide_index=True,
                         )
+
+
+# =========================================================================
+# Mode 2: Request Scheduling
+# =========================================================================
+elif workflow_mode == "Request Scheduling":
+    st.subheader("2. Request Scheduling")
+    st.info(
+        "Run a burst of local LLM requests through the serving scheduler. "
+        "Inspect priority order, overload and timeout outcomes, queue wait, "
+        "TTFT, latency, throughput, and effective batch sizes."
+    )
+
+    scheduler_col1, scheduler_col2, scheduler_col3 = st.columns(3)
+    with scheduler_col1:
+        scheduler_scenario = st.selectbox(
+            "Workload Scenario",
+            options=SCENARIO_NAMES,
+            index=SCENARIO_NAMES.index("mixed_priorities"),
+            help="Use overload to exercise queue rejection, or mixed_priorities to compare priority service.",
+        )
+        scheduler_requests = st.number_input(
+            "Number of Requests",
+            min_value=1,
+            max_value=128,
+            value=9,
+            step=1,
+        )
+        scheduler_max_new_tokens = st.number_input(
+            "Maximum New Tokens",
+            min_value=0,
+            max_value=512,
+            value=16,
+            step=1,
+            key="scheduler_max_new_tokens",
+        )
+    with scheduler_col2:
+        scheduler_batch_size = st.number_input(
+            "Maximum Batch Size", min_value=1, max_value=64, value=4, step=1,
+            key="scheduler_batch_size",
+        )
+        scheduler_batch_tokens = st.number_input(
+            "Maximum Batch Prompt Tokens", min_value=1, value=8192, step=256,
+            key="scheduler_batch_tokens",
+        )
+        scheduler_batch_window_ms = st.number_input(
+            "Batching Window (ms)", min_value=0.0, value=5.0, step=1.0,
+            key="scheduler_batch_window_ms",
+        )
+    with scheduler_col3:
+        default_queue = max(2, int(scheduler_requests) // 4) if scheduler_scenario == "overload" else 64
+        scheduler_queue_size = st.number_input(
+            "Maximum Waiting Queue",
+            min_value=1,
+            max_value=512,
+            value=default_queue,
+            step=1,
+            help="Requests beyond this waiting-queue limit are rejected.",
+            key=f"scheduler_queue_size_{scheduler_scenario}_{int(scheduler_requests)}",
+        )
+        scheduler_prompt_limit = st.number_input(
+            "Maximum Prompt Tokens",
+            min_value=1,
+            value=4096,
+            step=128,
+            key="scheduler_prompt_limit",
+        )
+        scheduler_generation_limit = st.number_input(
+            "Maximum Generated Tokens per Request",
+            min_value=0,
+            max_value=512,
+            value=128,
+            step=8,
+            key="scheduler_generation_limit",
+        )
+        scheduler_timeout_s = st.number_input(
+            "Request Timeout (seconds; 0 disables)",
+            min_value=0.0,
+            value=60.0,
+            step=1.0,
+            key="scheduler_timeout_s",
+        )
+        scheduler_aging_s = st.number_input(
+            "Priority Aging Interval (seconds; 0 disables)",
+            min_value=0.0,
+            value=5.0,
+            step=1.0,
+            key="scheduler_aging_s",
+        )
+
+    scheduler_seed = st.number_input(
+        "Workload Seed", min_value=0, value=0, step=1, key="scheduler_seed"
+    )
+    scheduler_cancel = st.checkbox(
+        "Cancel one request during this run",
+        value=False,
+        key="scheduler_cancel",
+        help="Cancellation releases the request caller; an ONNX batch already running cannot be interrupted.",
+    )
+    cancel_col1, cancel_col2 = st.columns(2)
+    with cancel_col1:
+        cancel_request_number = st.number_input(
+            "Request number to cancel",
+            min_value=1,
+            max_value=int(scheduler_requests),
+            value=1,
+            step=1,
+            disabled=not scheduler_cancel,
+            key=f"scheduler_cancel_number_{int(scheduler_requests)}",
+        )
+    with cancel_col2:
+        cancel_after_ms = st.number_input(
+            "Cancel after (ms)",
+            min_value=0,
+            max_value=60000,
+            value=0,
+            step=100,
+            disabled=not scheduler_cancel,
+            key="scheduler_cancel_after_ms",
+        )
+    st.caption(
+        "The scheduler uses cached generation and prompt-length buckets. "
+        "For a single request, choose the “single” scenario and set request count to 1."
+    )
+    scheduler_btn = st.button(
+        "Run Scheduler Workload",
+        type="primary",
+        use_container_width=True,
+    )
+
+    if scheduler_btn:
+        cleaned_model_path = model_path.strip() if model_path else ""
+        if not cleaned_model_path:
+            st.error("Select an ONNX model before running the scheduler.")
+        elif scheduler_scenario == "single" and int(scheduler_requests) != 1:
+            st.error("The single scenario requires exactly one request.")
+        else:
+            with st.spinner("Loading model and running scheduled workload..."):
+                try:
+                    generator = OnnxTextGenerator(
+                        Path(cleaned_model_path).parent,
+                        model_path=cleaned_model_path,
+                    )
+                    scenario = build_scenario(
+                        scheduler_scenario,
+                        max_new_tokens=int(scheduler_max_new_tokens),
+                        num_requests=int(scheduler_requests),
+                        seed=int(scheduler_seed),
+                    )
+                    batch_config = BatchConfig(
+                        max_batch_size=int(scheduler_batch_size),
+                        max_total_batch_tokens=int(scheduler_batch_tokens),
+                        batching_window_ms=float(scheduler_batch_window_ms),
+                    )
+                    scheduler_overrides = {
+                        "max_queue_length": int(scheduler_queue_size),
+                        "max_prompt_tokens": int(scheduler_prompt_limit),
+                        "max_new_tokens": int(scheduler_generation_limit),
+                        "default_timeout_s": (
+                            float(scheduler_timeout_s) if scheduler_timeout_s > 0 else None
+                        ),
+                        "aging_interval_s": (
+                            float(scheduler_aging_s) if scheduler_aging_s > 0 else None
+                        ),
+                    }
+                    scheduler_report = asyncio.run(
+                        run_scheduler_scenario(
+                            generator,
+                            scenario,
+                            batch_config,
+                            scheduler_overrides=scheduler_overrides,
+                            cancel_request_id=(
+                                f"{scheduler_scenario}-{int(cancel_request_number) - 1:03d}"
+                                if scheduler_cancel else None
+                            ),
+                            cancel_after_s=float(cancel_after_ms) / 1000.0,
+                        )
+                    )
+                except Exception as exc:
+                    st.error(f"Scheduler run failed: {type(exc).__name__}: {exc}")
+                else:
+                    counts = scheduler_report["outcome_counts"]
+                    metrics = scheduler_report["metrics"]
+                    st.session_state["scheduler_report"] = scheduler_report
+                    if scheduler_report["hung"]:
+                        st.error("The scheduler workload exceeded its overall time limit.")
+                    else:
+                        st.success(
+                            f"Finished {scheduler_report['requests']} requests "
+                            f"for scenario “{scheduler_report['scenario']}”."
+                        )
+
+                    count_col1, count_col2, count_col3, count_col4 = st.columns(4)
+                    count_col1.metric("Completed", counts.get("completed", 0))
+                    count_col2.metric("Rejected", scheduler_report["rejected"])
+                    count_col3.metric("Timed Out", counts.get("timed_out", 0))
+                    count_col4.metric("Failed / Cancelled", (
+                        counts.get("failed", 0) + counts.get("cancelled", 0)
+                    ))
+
+                    def metric_stat(key, field):
+                        value = metrics.get(key)
+                        return value.get(field) if value else None
+
+                    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+                    metric_col1.metric(
+                        "Queue Wait P50",
+                        fmt_ms(metric_stat("queue_wait_ms", "p50")),
+                    )
+                    metric_col2.metric(
+                        "TTFT P50",
+                        fmt_ms(metric_stat("ttft_ms", "p50")),
+                    )
+                    metric_col3.metric(
+                        "End-to-End P50",
+                        fmt_ms(metric_stat("end_to_end_ms", "p50")),
+                    )
+                    metric_col4.metric(
+                        "Generated Tokens / Second",
+                        fmt_float(metrics.get("tokens_per_second"), "tokens/s"),
+                    )
+
+                    batch_metrics = metrics.get("batching", {})
+                    batch_col1, batch_col2, batch_col3 = st.columns(3)
+                    batch_col1.metric(
+                        "Mean Effective Batch Size",
+                        fmt_float(batch_metrics.get("mean_effective_batch_size")),
+                    )
+                    batch_col2.metric(
+                        "Peak Queue Length",
+                        metrics.get("active", {}).get("peak_queued", 0),
+                    )
+                    batch_col3.metric(
+                        "Requests / Second",
+                        fmt_float(metrics.get("requests_per_second"), "req/s"),
+                    )
+
+                    st.markdown("### Request Outcomes")
+                    st.dataframe(
+                        scheduler_report["request_outcomes"],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.markdown("### Completion Order")
+                    st.dataframe(
+                        scheduler_report["completion_order"],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    with st.expander("Scheduler configuration and detailed metrics"):
+                        st.json({
+                            "scheduler_config": scheduler_report["scheduler_config"],
+                            "metrics": metrics,
+                            "mean_queue_wait_ms_by_priority":
+                                scheduler_report["mean_queue_wait_ms_by_priority"],
+                        })
+                    st.download_button(
+                        "Download Scheduler Results (JSON)",
+                        data=json.dumps(scheduler_report, indent=2, allow_nan=False),
+                        file_name=f"scheduler_{scheduler_report['scenario']}_results.json",
+                        mime="application/json",
+                    )
 
 
 # Mode 2: AutoTune Optimization
