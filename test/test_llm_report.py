@@ -16,7 +16,7 @@ from inferbench.benchmark.report import (
 )
 from inferbench.benchmark.scenarios import SCENARIO_NAMES, build_scenario, with_cache
 from models.batching import BatchConfig
-from tests.fake_llm import FakeGenerator
+from test.fake_llm import FakeGenerator
 
 
 def compare(generator, **kwargs):

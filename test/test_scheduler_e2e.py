@@ -15,7 +15,7 @@ from inferbench.benchmark.scenarios import build_scenario
 from inferbench.scheduler import RequestScheduler, SchedulerConfig
 from models.batching import BatchConfig
 from models.generation import GenerationConfig, GenerationRequest
-from tests.fake_llm import FakeGenerator
+from test.fake_llm import FakeGenerator
 
 MODEL_DIR = Path(__file__).resolve().parents[1] / "models" / "qwen2.5_0.5b"
 
