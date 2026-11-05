@@ -231,7 +231,7 @@ def test_run_tune_success():
         assert resp.status_code == 200
         assert resp.data == mock_data
         assert resp.data["speedup"] == 2.0
-        mock_post.assert_called_once_with("http://127.0.0.1:8000/tune", json=payload, timeout=300.0)
+        mock_post.assert_called_once_with("http://127.0.0.1:8000/tune", json=payload, timeout=600.0)
 
 
 def test_run_tune_client_error_400():

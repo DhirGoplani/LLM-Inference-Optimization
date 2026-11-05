@@ -22,6 +22,21 @@ pip install -e ".[test]"
 pytest
 ```
 
+## Dashboard workflows
+
+Start the FastAPI backend and Streamlit dashboard from the repository root:
+
+```bash
+uvicorn inferbench.api.main:app --host 127.0.0.1 --port 8000
+streamlit run inferbench/dashboard/app.py
+```
+
+The dashboard provides model inspection and execution-provider diagnostics,
+local greedy LLM generation with an optional KV cache, and the existing
+AutoTune/single-benchmark workflows. Select an ONNX file from `models/` and
+use **LLM Generation** to run a local tokenizer and ONNX decoder; the model
+directory must contain the tokenizer files required by the selected export.
+
 The MobileNet test model is not stored in git. To create it (needs the heavy `modelgen` extras):
 
 ```bash
@@ -30,6 +45,90 @@ python scripts/makemodel.py
 ```
 
 Tests that need the model are skipped if it is missing.
+
+## Local ONNX LLM generation
+
+`models.generation.OnnxTextGenerator` loads an ONNX decoder and a local
+Hugging Face tokenizer, then performs deterministic greedy generation:
+
+```python
+from models.generation import GenerationConfig, GenerationRequest, OnnxTextGenerator
+
+generator = OnnxTextGenerator("models/qwen2.5-0.5b")
+result = generator.generate(GenerationRequest(
+    "Explain KV cache in one sentence.",
+    GenerationConfig(max_new_tokens=32),
+))
+print(result.text, result.tokens_per_second)
+```
+
+`GenerationRequest` also accepts an optional `request_id`, `priority`, and
+`deadline_s`. Batched generation preserves each request ID and supports
+independent EOS and generation limits:
+
+```python
+from models.batching import BatchConfig, DynamicBatcher
+
+batch_config = BatchConfig(
+    max_batch_size=8,
+    max_total_batch_tokens=8192,
+    max_padding_ratio=0.5,
+    prompt_length_buckets=(128, 512, 2048, 4096),
+)
+results = generator.generate_batch(requests, batch_config)
+print(generator.last_batch_metrics)
+```
+
+For an apples-to-apples load comparison, the benchmark helper reports request
+throughput, generated-token throughput, mean latency, and p95 latency for single,
+unbucketed, and bucketed execution at each requested concurrency:
+
+```python
+from models.batching import benchmark_batching
+
+measurements = await benchmark_batching(generator, workload, [1, 4, 8], batch_config)
+```
+
+`generate_batch` forms same-bucket groups immediately. For concurrent callers,
+`DynamicBatcher` collects requests during its configured window and resolves
+each submitter with its own result:
+
+```python
+batcher = DynamicBatcher(
+    lambda pending: generator.generate_batch(list(pending), batch_config),
+    token_counter=lambda request: generator.count_prompt_tokens(request.prompt),
+    config=batch_config,
+)
+# Submit requests with `await batcher.submit(request)`, then call `await batcher.close()`.
+```
+
+Set `prompt_length_buckets=None` to compare unbucketed batching with the default
+bucketed policy. `BatchMetrics` reports effective batch size, prompt and padded
+token counts, padding overhead, formation and execution time, and aggregate
+generated tokens per second. Each `GenerationResult` retains per-request
+latency and throughput measurements. `generate(request)` remains available for
+single-request execution.
+
+The directory must contain an `.onnx` file and tokenizer files such as
+`tokenizer.json`/`tokenizer_config.json` and `vocab.json` or a SentencePiece
+model. Cached generation requires the export to expose matching past-cache
+inputs and present-cache outputs; use `GenerationConfig(use_cache=False)` for
+an uncached export.
+
+### Optional Hugging Face parity check
+
+After downloading the original Qwen weights (about 1 GB), compare the first
+20 greedy tokens for three fixed prompts:
+
+```bash
+python scripts/validate_qwen_generation.py
+```
+
+The pytest version is opt-in because it downloads/loads a large model:
+
+```bash
+RUN_QWEN_PARITY=1 python -m pytest -q tests/test_qwen_generation_parity.py
+```
 
 ## Benchmark engine (Member 2)
 

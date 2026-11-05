@@ -5,7 +5,11 @@ from __future__ import annotations
 from typing import Iterable
 
 from inferbench.optimizer.context import OptimizationContext, OptimizationStrategy, StrategyCandidate
-from inferbench.optimizer.strategies import CPUThreadTuningStrategy, GraphOptimizationStrategy
+from inferbench.optimizer.strategies import (
+    CPUThreadTuningStrategy,
+    GraphOptimizationStrategy,
+    QuantizationStrategy,
+)
 
 
 class StrategyRegistry:
@@ -66,9 +70,11 @@ class StrategyRegistry:
         return candidates, skipped
 
 
-def get_tuning_registry() -> StrategyRegistry:
+def get_tuning_registry(include_quantization: bool = False) -> StrategyRegistry:
     """Create a strategy registry with executable ONNX Runtime strategies."""
     registry = StrategyRegistry()
     registry.register(GraphOptimizationStrategy())
     registry.register(CPUThreadTuningStrategy())
+    if include_quantization:
+        registry.register(QuantizationStrategy())
     return registry

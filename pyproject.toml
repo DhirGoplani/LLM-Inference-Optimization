@@ -22,6 +22,11 @@ dependencies = [
 test = ["pytest>=8"]
 # only needed to export the MobileNet test model (scripts/makemodel.py)
 modelgen = ["torch", "torchvision", "onnxscript"]
+llm = [
+    "transformers>=4.45.0,<4.58.0",
+    "optimum-onnx[onnxruntime]>=0.1.0",
+    "accelerate>=0.34.0,<2.0.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src", "."]

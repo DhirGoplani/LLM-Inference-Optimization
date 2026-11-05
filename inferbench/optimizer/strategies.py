@@ -68,3 +68,35 @@ class CPUThreadTuningStrategy:
             )
             for count in counts
         ]
+
+class QuantizationStrategy:
+    """Strategy that proposes INT8 quantized variants of the model.
+
+    It only proposes candidates. The adapter creates the quantized files and
+    validates their accuracy before any candidate can be recommended.
+    """
+
+    name = "quantization"
+    category = "numerical"
+    description = "Quantize the model to INT8 (static and dynamic) and validate accuracy against FP32."
+
+    METHODS = ("static", "dynamic")
+
+    def is_applicable(self, context: OptimizationContext) -> tuple[bool, str | None]:
+        if context.runtime.lower() != "onnxruntime" or context.model_format.lower() != "onnx":
+            return False, "Quantization is currently supported for ONNX models on ONNX Runtime."
+        if not any("CPUExecutionProvider" in p for p in context.execution_providers):
+            return False, "INT8 quantization is only evaluated on CPUExecutionProvider."
+        return True, None
+
+    def generate_candidates(self, context: OptimizationContext) -> list[StrategyCandidate]:
+        return [
+            StrategyCandidate(
+                strategy=self.name,
+                config={"precision": "int8", "method": method},
+                description=f"INT8 {method} quantization, accepted only if accuracy holds.",
+                requires_artifact_transform=True,
+                tags=("precision", "quantization", "quality-validation-required"),
+            )
+            for method in self.METHODS
+        ]

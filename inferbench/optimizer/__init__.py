@@ -9,7 +9,11 @@ from inferbench.optimizer.adapter import (
 )
 from inferbench.optimizer.context import OptimizationContext, StrategyCandidate
 from inferbench.optimizer.registry import StrategyRegistry, get_tuning_registry
-from inferbench.optimizer.strategies import CPUThreadTuningStrategy, GraphOptimizationStrategy
+from inferbench.optimizer.strategies import (
+    CPUThreadTuningStrategy,
+    GraphOptimizationStrategy,
+    QuantizationStrategy,
+)
 
 __all__ = [
     "BASELINE_NUM_THREADS",
@@ -17,6 +21,7 @@ __all__ = [
     "StrategyCandidate",
     "GraphOptimizationStrategy",
     "CPUThreadTuningStrategy",
+    "QuantizationStrategy",
     "StrategyRegistry",
     "get_tuning_registry",
     "candidate_to_benchmark_config",

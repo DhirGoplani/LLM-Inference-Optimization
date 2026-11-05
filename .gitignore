@@ -19,3 +19,6 @@ Thumbs.db
 # ONNX model files
 *.onnx
 *.onnx.data
+
+# ONNX external tensor data
+*.onnx_data
