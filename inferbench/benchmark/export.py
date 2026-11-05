@@ -66,3 +66,28 @@ def save_results(results, path=None, results_dir="results"):
 def load_results(path):
     """Read a results file back. Returns the full document (a dict)."""
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def llm_report_to_json(report):
+    """An LLM comparison report (a dict from inferbench.benchmark.report) as strict JSON."""
+    return json.dumps(_clean(report), indent=2, allow_nan=False)
+
+
+def save_llm_report(report, path=None, results_dir="results"):
+    """Write an LLM comparison report to a .json file and return its path.
+
+    Without a path the name is ``llm_report_<model>_<time>.json`` in results_dir.
+    """
+    if path is None:
+        model = (report.get("model") or {}).get("name") or "model"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = Path(results_dir) / f"llm_report_{model}_{stamp}.json"
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(llm_report_to_json(report), encoding="utf-8")
+    return path
+
+
+def load_llm_report(path):
+    """Read an LLM comparison report back as a dict."""
+    return json.loads(Path(path).read_text(encoding="utf-8"))

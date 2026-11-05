@@ -130,6 +130,66 @@ The pytest version is opt-in because it downloads/loads a large model:
 RUN_QWEN_PARITY=1 python -m pytest -q tests/test_qwen_generation_parity.py
 ```
 
+## Request scheduling and evaluation (Member 4)
+
+`inferbench/scheduler/` puts a request scheduler in front of the batching and
+generation code. `inferbench/benchmark/report.py` then compares the five
+configurations from `division.md` and writes a JSON and Markdown report.
+
+```python
+from inferbench.scheduler import RequestScheduler, SchedulerConfig
+from models.batching import BatchConfig
+
+batch_config = BatchConfig(max_batch_size=4)
+scheduler = RequestScheduler(
+    lambda requests: generator.generate_batch(requests, batch_config),
+    token_counter=lambda request: generator.count_prompt_tokens(request.prompt),
+    config=SchedulerConfig(max_queue_length=32, default_timeout_s=60, max_batch_size=4),
+    batch_metrics_source=lambda: generator.last_batch_metrics,
+)
+async with scheduler:
+    result = await scheduler.submit(GenerationRequest("Hello", priority=1, deadline_s=30))
+    scheduler.cancel("some-request-id")          # queued or in-flight
+    print(scheduler.snapshot())                   # queue wait, TTFT, tokens/s, ...
+```
+
+Rules the scheduler enforces:
+
+- FIFO by default; a **higher** `priority` is served first, ties stay FIFO.
+- Aging (`aging_interval_s`): each interval of waiting adds one priority level, so
+  low-priority requests cannot starve.
+- Overload fails fast: a full queue, a too-long prompt or a too-long generation
+  raises `QueueFullError` / `PromptTooLongError` / `GenerationTooLongError`.
+- `deadline_s` (or `default_timeout_s`) bounds queue wait plus execution. A request
+  that expires while queued never runs.
+- `cancel(request_id)` removes a queued request. A request already inside a batch
+  cannot be interrupted (the executor call blocks), so the caller is released
+  at once and the late result is discarded.
+- Lifecycle states: queued, batched, prefilling, decoding, completed, cancelled,
+  timed_out, failed. `decoding` is only recorded if the executor calls
+  `scheduler.report_progress(...)`.
+
+Run the comparison (writes `results/llm_report_<model>_<time>.json` and `.md`):
+
+```bash
+python scripts/run_llm_benchmark.py --model-dir models/qwen2.5_0.5b
+python scripts/run_llm_benchmark.py --scenario mixed_lengths --max-new-tokens 16 --scheduling-scenarios
+```
+
+Scenarios: `single`, `concurrent`, `short`, `long`, `mixed_lengths`,
+`mixed_priorities`, `overload`. A configuration is only recommended when it passes
+the quality checks (EOS behaviour, length limits, exact-match rate against the
+baseline's tokens) **and** shows a measured benefit (tokens/s at least 1.10x the
+baseline, or peak memory at most 1/1.10). The report also records the model
+SHA-256, onnxruntime and Python versions, provider, hardware, seed, benchmark
+configuration, git commit and timestamp.
+
+The scheduler and report tests use a fake generator and need no model:
+
+```bash
+python -m pytest tests/test_scheduler.py tests/test_scheduler_e2e.py tests/test_llm_report.py tests/test_llm_correctness.py
+```
+
 ## Benchmark engine (Member 2)
 
 ```python
